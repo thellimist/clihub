@@ -254,31 +254,71 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	verbose("Generated project at %s", projectDir)
 
-	// Compile for current platform
-	goos, goarch := compile.CurrentPlatform()
-	verbose("Compiling %s for %s/%s...", cliName, goos, goarch)
-
-	binaryPath, err := compile.Compile(projectDir, flagOutput, cliName, goos, goarch)
+	// Parse platforms
+	platforms, err := compile.ParsePlatforms(flagPlatform)
 	if err != nil {
-		// Preserve temp dir on failure
-		cleanupDir = ""
-		return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+		return err
+	}
+	multiPlatform := len(platforms) > 1
+
+	// Compile for each platform
+	var binaries []string
+	for _, p := range platforms {
+		if flagVerbose {
+			fmt.Printf("Compiling %s...", p)
+		}
+
+		start := time.Now()
+		binaryPath, err := compile.Compile(projectDir, flagOutput, cliName, p, multiPlatform)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			if flagVerbose {
+				fmt.Println(" failed")
+			}
+			cleanupDir = ""
+			return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+		}
+
+		if flagVerbose {
+			fmt.Printf(" done (%.1fs)\n", elapsed.Seconds())
+		}
+		binaries = append(binaries, binaryPath)
 	}
 
-	verbose("Compiled binary at %s", binaryPath)
-
-	// Smoke test
-	verbose("Running smoke test...")
-	if err := compile.SmokeTest(binaryPath); err != nil {
-		cleanupDir = ""
-		return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+	// Smart smoke test: only run if host platform is in the target list
+	hostGOOS, hostGOARCH := compile.CurrentPlatform()
+	hostPlatform := hostGOOS + "/" + hostGOARCH
+	var hostBinary string
+	for i, p := range platforms {
+		if p.String() == hostPlatform {
+			hostBinary = binaries[i]
+			break
+		}
 	}
-	verbose("Smoke test passed")
+
+	if hostBinary != "" {
+		verbose("Running smoke test...")
+		if err := compile.SmokeTest(hostBinary); err != nil {
+			cleanupDir = ""
+			return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+		}
+		verbose("Smoke test passed")
+	} else {
+		verbose("Warning: smoke test skipped — no binary for host platform (%s)", hostPlatform)
+	}
 
 	// Print summary
 	if !flagQuiet {
-		fmt.Printf("Generated %s from %s (%d tools)\n", cliName, target, len(finalTools))
-		fmt.Printf("Binary: %s\n", binaryPath)
+		fmt.Printf("Generated %s from %s (%d tools, %d platform", cliName, target, len(finalTools), len(platforms))
+		if len(platforms) != 1 {
+			fmt.Print("s")
+		}
+		fmt.Println(")")
+		fmt.Println("Binaries:")
+		for _, b := range binaries {
+			fmt.Printf("  %s\n", b)
+		}
 	}
 
 	return nil

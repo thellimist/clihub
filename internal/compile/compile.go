@@ -12,11 +12,8 @@ import (
 
 // Compile runs go build for the given project directory and target platform.
 // Returns the path to the compiled binary.
-func Compile(projectDir, outputDir, name, goos, goarch string) (string, error) {
-	binaryName := name
-	if goos == "windows" {
-		binaryName += ".exe"
-	}
+func Compile(projectDir, outputDir, name string, p Platform, multiPlatform bool) (string, error) {
+	binaryName := BinaryName(name, p, multiPlatform)
 
 	// Make output path absolute so go build writes to the right place
 	absOutput, err := filepath.Abs(outputDir)
@@ -33,12 +30,12 @@ func Compile(projectDir, outputDir, name, goos, goarch string) (string, error) {
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(),
 		"CGO_ENABLED=0",
-		"GOOS="+goos,
-		"GOARCH="+goarch,
+		"GOOS="+p.GOOS,
+		"GOARCH="+p.GOARCH,
 	)
 
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("go build failed for %s/%s: %s", goos, goarch, string(out))
+		return "", fmt.Errorf("go build failed for %s: %s", p, string(out))
 	}
 
 	return binaryPath, nil
