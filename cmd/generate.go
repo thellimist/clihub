@@ -3,13 +3,18 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/clihub/clihub/internal/auth"
+	"github.com/clihub/clihub/internal/codegen"
+	"github.com/clihub/clihub/internal/compile"
 	"github.com/clihub/clihub/internal/gocheck"
 	"github.com/clihub/clihub/internal/mcp"
 	"github.com/clihub/clihub/internal/nameutil"
+	"github.com/clihub/clihub/internal/schema"
 	"github.com/clihub/clihub/internal/toolfilter"
 	"github.com/spf13/cobra"
 )
@@ -142,7 +147,6 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	include := toolfilter.ParseToolList(flagIncludeTools)
 	exclude := toolfilter.ParseToolList(flagExcludeTools)
 
-	// Convert mcp.Tool to toolfilter.Tool
 	filterTools := make([]toolfilter.Tool, len(tools))
 	for i, t := range tools {
 		filterTools[i] = toolfilter.Tool{Name: t.Name, Description: t.Description}
@@ -153,7 +157,6 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Map filtered results back to mcp.Tool
 	filteredSet := make(map[string]bool, len(filtered))
 	for _, ft := range filtered {
 		filteredSet[ft.Name] = true
@@ -184,30 +187,125 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		verbose("Inferred CLI name: %s", cliName)
 	}
 
-	// Print discovery summary (unless quiet)
-	if !flagQuiet {
-		fmt.Printf("Discovered %d tools from %s\n", len(finalTools), target)
-		fmt.Printf("CLI name: %s\n", cliName)
-		fmt.Printf("Output: %s\n", flagOutput)
-		fmt.Println()
-		fmt.Println("Tools:")
-		for _, t := range finalTools {
-			desc := t.Description
-			if len(desc) > 72 {
-				desc = desc[:69] + "..."
+	// REQ-13a: Save credentials if requested
+	if flagSaveCredentials && flagAuthToken != "" {
+		serverURL := flagURL
+		if serverURL != "" {
+			credPath := auth.DefaultCredentialsPath()
+			creds, err := auth.LoadCredentials(credPath)
+			if err != nil {
+				return fmt.Errorf("load credentials: %w", err)
 			}
-			if desc != "" {
-				fmt.Printf("  - %s: %s\n", t.Name, desc)
-			} else {
-				fmt.Printf("  - %s\n", t.Name)
+			auth.SetToken(creds, serverURL, flagAuthToken)
+			if err := auth.SaveCredentials(credPath, creds); err != nil {
+				return fmt.Errorf("save credentials: %w", err)
+			}
+			info("Saved credentials to %s", credPath)
+		}
+	}
+
+	// Process tool schemas
+	verbose("Processing tool schemas...")
+	toolDefs, err := processToolSchemas(finalTools)
+	if err != nil {
+		return err
+	}
+
+	// Build codegen context
+	genCtx := codegen.GenerateContext{
+		CLIName:       cliName,
+		Tools:         toolDefs,
+		ClihubVersion: appVersion,
+		IsHTTP:        flagURL != "",
+	}
+
+	if flagURL != "" {
+		genCtx.ServerURL = flagURL
+	} else {
+		parts, _ := nameutil.SplitCommand(flagStdio)
+		if len(parts) > 0 {
+			genCtx.StdioCommand = parts[0]
+			if len(parts) > 1 {
+				genCtx.StdioArgs = parts[1:]
 			}
 		}
-		fmt.Println()
-		fmt.Println("Phase 1 complete: tool discovery successful.")
-		fmt.Println("Code generation and compilation will be available in Phase 2.")
+		// Extract env keys (not values)
+		for _, env := range flagEnv {
+			if idx := strings.Index(env, "="); idx > 0 {
+				genCtx.EnvKeys = append(genCtx.EnvKeys, env[:idx])
+			}
+		}
+	}
+
+	// Generate Go project
+	verbose("Generating Go project...")
+	projectDir, err := codegen.Generate(genCtx, "")
+	if err != nil {
+		return fmt.Errorf("code generation failed: %w", err)
+	}
+
+	// Track temp dir for cleanup
+	cleanupDir := projectDir
+	defer func() {
+		if cleanupDir != "" {
+			os.RemoveAll(cleanupDir)
+		}
+	}()
+
+	verbose("Generated project at %s", projectDir)
+
+	// Compile for current platform
+	goos, goarch := compile.CurrentPlatform()
+	verbose("Compiling %s for %s/%s...", cliName, goos, goarch)
+
+	binaryPath, err := compile.Compile(projectDir, flagOutput, cliName, goos, goarch)
+	if err != nil {
+		// Preserve temp dir on failure
+		cleanupDir = ""
+		return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+	}
+
+	verbose("Compiled binary at %s", binaryPath)
+
+	// Smoke test
+	verbose("Running smoke test...")
+	if err := compile.SmokeTest(binaryPath); err != nil {
+		cleanupDir = ""
+		return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+	}
+	verbose("Smoke test passed")
+
+	// Print summary
+	if !flagQuiet {
+		fmt.Printf("Generated %s from %s (%d tools)\n", cliName, target, len(finalTools))
+		fmt.Printf("Binary: %s\n", binaryPath)
 	}
 
 	return nil
+}
+
+// processToolSchemas converts MCP tools to codegen tool definitions.
+func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
+	defs := make([]codegen.ToolDef, 0, len(tools))
+	for _, t := range tools {
+		options, err := schema.ExtractOptions(t.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("schema processing for tool %q: %w", t.Name, err)
+		}
+
+		commandName := schema.ToFlagName(strings.ReplaceAll(t.Name, "_", "-"))
+		if commandName == "" {
+			commandName = t.Name
+		}
+
+		defs = append(defs, codegen.ToolDef{
+			Name:        t.Name,
+			CommandName: commandName,
+			Description: t.Description,
+			Options:     options,
+		})
+	}
+	return defs, nil
 }
 
 // createTransport creates the appropriate MCP transport based on flags.
@@ -217,7 +315,6 @@ func createTransport() (mcp.Transport, string, error) {
 		return transport, flagURL, nil
 	}
 
-	// Stdio transport
 	parts, err := nameutil.SplitCommand(flagStdio)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid --stdio command: %s", err)
@@ -246,13 +343,18 @@ func verbose(format string, args ...interface{}) {
 	}
 }
 
+// info prints a message unless --quiet is set.
+func info(format string, args ...interface{}) {
+	if !flagQuiet {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
 func validateFlags() error {
-	// REQ-16: Must provide either --url or --stdio
 	if flagURL == "" && flagStdio == "" {
 		return fmt.Errorf("provide --url or --stdio to specify the MCP server")
 	}
 
-	// REQ-60: Mutual exclusivity checks
 	if flagURL != "" && flagStdio != "" {
 		return fmt.Errorf("--url and --stdio cannot be used together")
 	}
@@ -265,7 +367,6 @@ func validateFlags() error {
 		return fmt.Errorf("--verbose and --quiet cannot be used together")
 	}
 
-	// Validate --env format
 	for _, env := range flagEnv {
 		if !strings.Contains(env, "=") {
 			return fmt.Errorf("invalid --env format %q: expected KEY=VALUE", env)
