@@ -24,7 +24,7 @@ func quoteStr(s string) string {
 
 func quoteSlice(ss []string) string {
 	if len(ss) == 0 {
-		return "nil"
+		return "[]string(nil)"
 	}
 	parts := make([]string, len(ss))
 	for i, s := range ss {

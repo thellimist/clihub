@@ -97,12 +97,21 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 		log("Registering OAuth client...")
 		reg, err := RegisterClient(ctx, cfg.HTTPClient, authMeta.RegistrationEndpoint, callback.RedirectURI(), scope)
 		if err != nil {
-			return nil, fmt.Errorf("client registration failed: %w\n\nTo use a pre-registered OAuth app, pass --client-id (and --client-secret if needed)", err)
+			return nil, fmt.Errorf("client registration failed at %s: %w\n\n"+
+				"This server requires a pre-registered OAuth app.\n"+
+				"  1. Register an OAuth app at the provider's developer portal (%s)\n"+
+				"  2. Set the redirect URI to: http://127.0.0.1/callback\n"+
+				"  3. Run: clihub generate --url <server-url> --client-id <YOUR_CLIENT_ID> --client-secret <YOUR_SECRET>",
+				authMeta.RegistrationEndpoint, err, authMeta.Issuer)
 		}
 		clientID = reg.ClientID
 		clientSecret = reg.ClientSecret
 	} else {
-		return nil, fmt.Errorf("authorization server does not support dynamic client registration\n\nTo use a pre-registered OAuth app, pass --client-id (and --client-secret if needed)")
+		return nil, fmt.Errorf("this server requires a pre-registered OAuth app (no automatic registration available)\n\n"+
+			"  1. Register an OAuth app at the provider's developer portal (%s)\n"+
+			"  2. Set the redirect URI to: http://127.0.0.1/callback\n"+
+			"  3. Run: clihub generate --url <server-url> --client-id <YOUR_CLIENT_ID> --client-secret <YOUR_SECRET>",
+			authMeta.Issuer)
 	}
 
 	// Step 5: Generate PKCE

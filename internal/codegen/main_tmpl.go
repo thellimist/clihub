@@ -187,6 +187,15 @@ func callTool(toolName string, params map[string]interface{}) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("tool call timed out after %dms", globalTimeout)
 		}
+{{- if not .IsHTTP}}
+		// Capture stderr from crashed subprocess
+		if r, ok := mcpclient.GetStderr(c); ok && r != nil {
+			buf := make([]byte, 2048)
+			if n, _ := r.Read(buf); n > 0 {
+				return fmt.Errorf("MCP server crashed:\n  %s", strings.ReplaceAll(strings.TrimSpace(string(buf[:n])), "\n", "\n  "))
+			}
+		}
+{{- end}}
 		return fmt.Errorf("MCP handshake failed: %w", err)
 	}
 

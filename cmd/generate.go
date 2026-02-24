@@ -158,7 +158,11 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	_, err = mcpClient.Initialize(ctx, initReq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("MCP server did not respond within %dms", flagTimeout)
+			errMsg := fmt.Sprintf("MCP server did not respond within %dms", flagTimeout)
+			if stderr := captureStderr(mcpClient); stderr != "" {
+				errMsg += fmt.Sprintf("\n\nServer stderr:\n  %s", strings.ReplaceAll(stderr, "\n", "\n  "))
+			}
+			return fmt.Errorf("%s", errMsg)
 		}
 		// If using an interactive auth type and we got an auth error, run the flow
 		if isAuthError(err) && (flagAuthType == "oauth2" || flagAuthType == "dcr_oauth") {
@@ -260,7 +264,11 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
 			}
 		} else {
-			return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+			errMsg := fmt.Sprintf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+			if stderr := captureStderr(mcpClient); stderr != "" {
+				errMsg += fmt.Sprintf("\n\nServer stderr:\n  %s", strings.ReplaceAll(stderr, "\n", "\n  "))
+			}
+			return fmt.Errorf("%s", errMsg)
 		}
 	}
 	verbose("Handshake complete")
@@ -725,6 +733,21 @@ func createMCPClient() (*mcpclient.Client, error) {
 		return nil, fmt.Errorf("failed to connect to MCP server at %s: %s", flagStdio, err)
 	}
 	return c, nil
+}
+
+// captureStderr reads up to 2KB of stderr from a stdio MCP client.
+// Returns empty string for non-stdio clients or if stderr is empty.
+func captureStderr(c *mcpclient.Client) string {
+	r, ok := mcpclient.GetStderr(c)
+	if !ok || r == nil {
+		return ""
+	}
+	buf := make([]byte, 2048)
+	n, _ := r.Read(buf)
+	if n == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(buf[:n]))
 }
 
 // createHTTPClient creates an HTTP-based mcp-go client with the given AuthProvider.
