@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -12,11 +13,13 @@ import (
 	"github.com/clihub/clihub/internal/codegen"
 	"github.com/clihub/clihub/internal/compile"
 	"github.com/clihub/clihub/internal/gocheck"
-	"github.com/clihub/clihub/internal/mcp"
 	"github.com/clihub/clihub/internal/nameutil"
 	"github.com/clihub/clihub/internal/oauth"
 	"github.com/clihub/clihub/internal/schema"
 	"github.com/clihub/clihub/internal/toolfilter"
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/cobra"
 )
 
@@ -111,41 +114,84 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: --auth-token is ignored for stdio servers. Use --env to pass credentials\n")
 	}
 
-	// Create MCP transport
+	// Determine target for error messages
+	target := flagURL
+	if target == "" {
+		target = flagStdio
+	}
+
+	// Create MCP client via mcp-go SDK
 	verbose("Connecting to MCP server...")
-	transport, target, err := createTransport()
+	mcpClient, err := createMCPClient()
 	if err != nil {
 		return err
 	}
+	defer mcpClient.Close()
 
-	// Create client and run discovery with timeout
-	client := mcp.NewClient(transport)
-	defer client.Close()
-
+	// Start transport (required for HTTP; stdio auto-starts in NewStdioMCPClient)
 	timeout := time.Duration(flagTimeout) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	if flagURL != "" {
+		if err := mcpClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to connect to MCP server at %s: %s", target, err)
+		}
+	}
+
 	// REQ-19/20: Initialize handshake
 	verbose("Performing MCP handshake...")
-	_, err = client.Initialize(ctx, "clihub", appVersion)
+	initReq := mcp.InitializeRequest{}
+	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	initReq.Params.ClientInfo = mcp.Implementation{
+		Name:    "clihub",
+		Version: appVersion,
+	}
+	initReq.Params.Capabilities = mcp.ClientCapabilities{}
+
+	_, err = mcpClient.Initialize(ctx, initReq)
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("MCP server did not respond within %dms", flagTimeout)
 		}
-		return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+		// If OAuth is enabled and we got an auth error, try the OAuth flow
+		if flagOAuth && isAuthError(err) {
+			verbose("Authentication required, starting OAuth flow...")
+			token, oauthErr := runOAuthFlow(ctx)
+			if oauthErr != nil {
+				return fmt.Errorf("OAuth authentication failed: %w", oauthErr)
+			}
+			// Recreate client with the new token
+			mcpClient.Close()
+			mcpClient, err = createHTTPClient(token)
+			if err != nil {
+				return err
+			}
+			defer mcpClient.Close()
+			if err := mcpClient.Start(ctx); err != nil {
+				return fmt.Errorf("failed to connect after OAuth: %s", err)
+			}
+			_, err = mcpClient.Initialize(ctx, initReq)
+			if err != nil {
+				return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+			}
+		} else {
+			return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+		}
 	}
 	verbose("Handshake complete")
 
 	// REQ-23: Discover tools
 	verbose("Discovering tools...")
-	tools, err := client.ListTools(ctx)
+	toolsResult, err := mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("MCP server did not respond within %dms", flagTimeout)
 		}
 		return fmt.Errorf("failed to connect to MCP server at %s: %s", target, err)
 	}
+
+	tools := toolsResult.Tools
 
 	// REQ-63: No tools found
 	if len(tools) == 0 {
@@ -334,11 +380,17 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// processToolSchemas converts MCP tools to codegen tool definitions.
+// processToolSchemas converts mcp-go tools to codegen tool definitions.
 func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
 	defs := make([]codegen.ToolDef, 0, len(tools))
 	for _, t := range tools {
-		options, err := schema.ExtractOptions(t.InputSchema)
+		// Marshal the mcp-go ToolInputSchema to json.RawMessage for schema processing
+		inputSchemaJSON, err := json.Marshal(t.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("schema marshaling for tool %q: %w", t.Name, err)
+		}
+
+		options, err := schema.ExtractOptions(inputSchemaJSON)
 		if err != nil {
 			return nil, fmt.Errorf("schema processing for tool %q: %w", t.Name, err)
 		}
@@ -358,55 +410,29 @@ func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
 	return defs, nil
 }
 
-// createTransport creates the appropriate MCP transport based on flags.
-func createTransport() (mcp.Transport, string, error) {
+// createMCPClient creates the appropriate mcp-go client based on flags.
+func createMCPClient() (*mcpclient.Client, error) {
 	if flagURL != "" {
-		if flagOAuth {
+		// Resolve auth token
+		token := flagAuthToken
+		if token == "" && flagOAuth {
+			// Try cached token first
 			credPath := auth.DefaultCredentialsPath()
-			var verboseFn func(string, ...interface{})
-			if flagVerbose {
-				verboseFn = func(format string, args ...interface{}) {
-					verbose(format, args...)
-				}
+			creds, err := auth.LoadCredentials(credPath)
+			if err == nil {
+				token = auth.GetToken(creds, flagURL)
 			}
-			provider := &oauth.Provider{
-				Verbose:      verboseFn,
-				ClientID:     flagClientID,
-				ClientSecret: flagClientSecret,
-				OnTokens: func(serverURL string, tokens *oauth.OAuthTokens) {
-					creds, err := auth.LoadCredentials(credPath)
-					if err != nil {
-						return
-					}
-					auth.SetOAuthTokens(creds, serverURL, tokens.AccessToken, tokens.RefreshToken, tokens.ClientID, tokens.Scope, &tokens.ExpiresAt)
-					auth.SaveCredentials(credPath, creds)
-					info("OAuth tokens saved to %s", credPath)
-				},
-			}
-
-			// Check for cached token
-			token := flagAuthToken
-			if token == "" {
-				creds, err := auth.LoadCredentials(credPath)
-				if err == nil {
-					token = auth.GetToken(creds, flagURL)
-				}
-			}
-
-			transport := mcp.NewHTTPTransportWithOAuth(flagURL, token, provider)
-			return transport, flagURL, nil
 		}
-
-		transport := mcp.NewHTTPTransport(flagURL, flagAuthToken)
-		return transport, flagURL, nil
+		return createHTTPClient(token)
 	}
 
+	// Stdio transport
 	parts, err := nameutil.SplitCommand(flagStdio)
 	if err != nil {
-		return nil, "", fmt.Errorf("invalid --stdio command: %s", err)
+		return nil, fmt.Errorf("invalid --stdio command: %s", err)
 	}
 	if len(parts) == 0 {
-		return nil, "", fmt.Errorf("--stdio command is empty")
+		return nil, fmt.Errorf("--stdio command is empty")
 	}
 
 	command := parts[0]
@@ -415,11 +441,71 @@ func createTransport() (mcp.Transport, string, error) {
 		cmdArgs = parts[1:]
 	}
 
-	transport := mcp.NewStdioTransport(command, cmdArgs, flagEnv)
-	if err := transport.Start(); err != nil {
-		return nil, "", fmt.Errorf("failed to connect to MCP server at %s: %s", flagStdio, err)
+	c, err := mcpclient.NewStdioMCPClient(command, flagEnv, cmdArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MCP server at %s: %s", flagStdio, err)
 	}
-	return transport, flagStdio, nil
+	return c, nil
+}
+
+// createHTTPClient creates an HTTP-based mcp-go client with the given auth token.
+func createHTTPClient(token string) (*mcpclient.Client, error) {
+	var opts []transport.StreamableHTTPCOption
+	if token != "" {
+		opts = append(opts, transport.WithHTTPHeaders(map[string]string{
+			"Authorization": "Bearer " + token,
+		}))
+	}
+	c, err := mcpclient.NewStreamableHttpClient(flagURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client for %s: %s", flagURL, err)
+	}
+	return c, nil
+}
+
+// runOAuthFlow executes the OAuth authentication flow and returns the access token.
+func runOAuthFlow(ctx context.Context) (string, error) {
+	credPath := auth.DefaultCredentialsPath()
+	var verboseFn func(string, ...interface{})
+	if flagVerbose {
+		verboseFn = func(format string, args ...interface{}) {
+			verbose(format, args...)
+		}
+	}
+
+	cfg := oauth.FlowConfig{
+		ServerURL:    flagURL,
+		ClientID:     flagClientID,
+		ClientSecret: flagClientSecret,
+		Verbose:      verboseFn,
+	}
+
+	tokens, err := oauth.Authenticate(ctx, cfg)
+	if err != nil {
+		return "", err
+	}
+
+	// Save tokens to credential store
+	creds, loadErr := auth.LoadCredentials(credPath)
+	if loadErr == nil {
+		auth.SetOAuthTokens(creds, flagURL, tokens.AccessToken, tokens.RefreshToken, tokens.ClientID, tokens.Scope, &tokens.ExpiresAt)
+		if saveErr := auth.SaveCredentials(credPath, creds); saveErr == nil {
+			info("OAuth tokens saved to %s", credPath)
+		}
+	}
+
+	return tokens.AccessToken, nil
+}
+
+// isAuthError checks if an error indicates an authentication failure.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") ||
+		strings.Contains(msg, "Unauthorized") ||
+		strings.Contains(msg, "unauthorized")
 }
 
 // verbose prints a message if --verbose is set.
