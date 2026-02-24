@@ -33,6 +33,8 @@ var (
 	flagEnv             []string
 	flagSaveCredentials bool
 	flagOAuth           bool
+	flagClientID        string
+	flagClientSecret    string
 	flagVerbose         bool
 	flagQuiet           bool
 )
@@ -85,6 +87,8 @@ func init() {
 	f.StringSliceVar(&flagEnv, "env", nil, "environment variables for stdio servers (KEY=VALUE, repeatable)")
 	f.BoolVar(&flagSaveCredentials, "save-credentials", false, "persist auth token to ~/.clihub/credentials.json")
 	f.BoolVar(&flagOAuth, "oauth", false, "use OAuth for authentication (interactive browser flow)")
+	f.StringVar(&flagClientID, "client-id", "", "pre-registered OAuth client ID (use with --oauth)")
+	f.StringVar(&flagClientSecret, "client-secret", "", "pre-registered OAuth client secret (use with --oauth)")
 	f.BoolVar(&flagVerbose, "verbose", false, "show detailed progress during generation")
 	f.BoolVar(&flagQuiet, "quiet", false, "suppress all output except errors")
 }
@@ -366,7 +370,9 @@ func createTransport() (mcp.Transport, string, error) {
 				}
 			}
 			provider := &oauth.Provider{
-				Verbose: verboseFn,
+				Verbose:      verboseFn,
+				ClientID:     flagClientID,
+				ClientSecret: flagClientSecret,
 				OnTokens: func(serverURL string, tokens *oauth.OAuthTokens) {
 					creds, err := auth.LoadCredentials(credPath)
 					if err != nil {
@@ -449,6 +455,10 @@ func validateFlags() error {
 
 	if flagOAuth && flagStdio != "" {
 		return fmt.Errorf("--oauth is not supported for stdio servers")
+	}
+
+	if (flagClientID != "" || flagClientSecret != "") && !flagOAuth {
+		return fmt.Errorf("--client-id and --client-secret require --oauth")
 	}
 
 	for _, env := range flagEnv {

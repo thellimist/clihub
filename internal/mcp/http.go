@@ -8,12 +8,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
+// OAuthHints contains hints extracted from a 401 WWW-Authenticate response.
+type OAuthHints struct {
+	ResourceMetadataURL string // From resource_metadata param
+	Scope               string // From scope param
+}
+
 // OAuthProvider handles OAuth authentication when the server returns 401.
 type OAuthProvider interface {
-	Authenticate(ctx context.Context, serverURL string) (string, error)
+	Authenticate(ctx context.Context, serverURL string, hints *OAuthHints) (string, error)
 }
 
 // HTTPTransport implements the Transport interface using Streamable HTTP.
@@ -86,10 +93,11 @@ func (t *HTTPTransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPC
 
 	// Handle 401 with OAuth fallback
 	if resp.StatusCode == http.StatusUnauthorized && t.oauthProvider != nil && !t.oauthAttempted {
+		hints := parseWWWAuthenticate(resp.Header.Get("WWW-Authenticate"))
 		resp.Body.Close()
 		t.oauthAttempted = true
 
-		token, err := t.oauthProvider.Authenticate(ctx, t.URL)
+		token, err := t.oauthProvider.Authenticate(ctx, t.URL, hints)
 		if err != nil {
 			return nil, fmt.Errorf("OAuth authentication failed: %w", err)
 		}
@@ -115,6 +123,38 @@ func (t *HTTPTransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPC
 	}
 
 	return &rpcResp, nil
+}
+
+// parseWWWAuthenticate extracts resource_metadata and scope from a
+// WWW-Authenticate: Bearer header per RFC 9728.
+func parseWWWAuthenticate(header string) *OAuthHints {
+	if header == "" {
+		return nil
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) < 2 || !strings.EqualFold(parts[0], "bearer") {
+		return nil
+	}
+
+	hints := &OAuthHints{}
+	hints.ResourceMetadataURL = extractWWWAuthField(parts[1], "resource_metadata")
+	hints.Scope = extractWWWAuthField(parts[1], "scope")
+
+	if hints.ResourceMetadataURL == "" && hints.Scope == "" {
+		return nil
+	}
+	return hints
+}
+
+var wwwAuthFieldRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
+
+func extractWWWAuthField(params, field string) string {
+	for _, match := range wwwAuthFieldRe.FindAllStringSubmatch(params, -1) {
+		if match[1] == field {
+			return match[2]
+		}
+	}
+	return ""
 }
 
 // parseSSE reads an SSE stream and extracts the JSON-RPC response matching the

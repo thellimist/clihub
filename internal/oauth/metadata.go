@@ -10,6 +10,12 @@ import (
 	"strings"
 )
 
+// FetchProtectedResourceMetadataFromURL fetches resource metadata from a specific URL
+// (typically provided by the WWW-Authenticate header's resource_metadata parameter).
+func FetchProtectedResourceMetadataFromURL(ctx context.Context, client *http.Client, metadataURL string) (*ProtectedResourceMetadata, error) {
+	return fetchResourceMeta(ctx, client, metadataURL)
+}
+
 // FetchProtectedResourceMetadata fetches the RFC 9728 protected resource metadata.
 // It tries the RFC-compliant URL with path appended first, then falls back to path-less.
 func FetchProtectedResourceMetadata(ctx context.Context, client *http.Client, serverURL string) (*ProtectedResourceMetadata, error) {

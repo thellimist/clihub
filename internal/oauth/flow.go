@@ -11,16 +11,20 @@ import (
 
 // FlowConfig configures the OAuth authentication flow.
 type FlowConfig struct {
-	ServerURL  string
-	HTTPClient *http.Client
-	Verbose    func(format string, args ...interface{})
+	ServerURL           string
+	HTTPClient          *http.Client
+	Verbose             func(format string, args ...interface{})
+	ClientID            string // Pre-registered client ID (skips dynamic registration)
+	ClientSecret        string // Pre-registered client secret
+	ResourceMetadataURL string // Hint from WWW-Authenticate header
+	Scope               string // Hint from WWW-Authenticate header
 }
 
 // Authenticate runs the full MCP OAuth flow:
 // 1. Discover protected resource metadata (RFC 9728)
 // 2. Discover authorization server metadata (RFC 8414)
 // 3. Start local callback server
-// 4. Register client dynamically (RFC 7591)
+// 4. Register client dynamically (RFC 7591) — or use pre-registered client ID
 // 5. Generate PKCE verifier/challenge
 // 6. Open browser to authorization URL
 // 7. Wait for callback with authorization code
@@ -36,14 +40,25 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 
 	// Step 1: Discover protected resource metadata
 	log("Discovering OAuth endpoints...")
-	resMeta, err := FetchProtectedResourceMetadata(ctx, cfg.HTTPClient, cfg.ServerURL)
+	var resMeta *ProtectedResourceMetadata
+	var err error
+
+	if cfg.ResourceMetadataURL != "" {
+		// Use the URL from the WWW-Authenticate header directly
+		log("Using resource metadata URL from server: %s", cfg.ResourceMetadataURL)
+		resMeta, err = FetchProtectedResourceMetadataFromURL(ctx, cfg.HTTPClient, cfg.ResourceMetadataURL)
+	} else {
+		resMeta, err = FetchProtectedResourceMetadata(ctx, cfg.HTTPClient, cfg.ServerURL)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("OAuth discovery failed: %w", err)
 	}
 
-	// Determine scope: prefer resource metadata, then auth server metadata, then default
+	// Determine scope: explicit > resource metadata > auth server metadata > default
 	scope := "mcp:tools"
-	if len(resMeta.ScopesSupported) > 0 {
+	if cfg.Scope != "" {
+		scope = cfg.Scope
+	} else if len(resMeta.ScopesSupported) > 0 {
 		scope = strings.Join(resMeta.ScopesSupported, " ")
 	}
 
@@ -54,8 +69,8 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	}
 	log("Found authorization server: %s", authMeta.Issuer)
 
-	// Override scope from auth server if resource didn't specify
-	if len(resMeta.ScopesSupported) == 0 && len(authMeta.ScopesSupported) > 0 {
+	// Override scope from auth server if nothing else specified it
+	if cfg.Scope == "" && len(resMeta.ScopesSupported) == 0 && len(authMeta.ScopesSupported) > 0 {
 		scope = strings.Join(authMeta.ScopesSupported, " ")
 	}
 
@@ -66,18 +81,23 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	}
 	defer callback.Close()
 
-	// Step 4: Register client (if registration endpoint available)
+	// Step 4: Get client credentials (pre-registered or dynamic registration)
 	var clientID, clientSecret string
-	if authMeta.RegistrationEndpoint != "" {
+	if cfg.ClientID != "" {
+		// Use pre-registered client credentials — skip dynamic registration
+		clientID = cfg.ClientID
+		clientSecret = cfg.ClientSecret
+		log("Using pre-registered client: %s", clientID)
+	} else if authMeta.RegistrationEndpoint != "" {
 		log("Registering OAuth client...")
 		reg, err := RegisterClient(ctx, cfg.HTTPClient, authMeta.RegistrationEndpoint, callback.RedirectURI(), scope)
 		if err != nil {
-			return nil, fmt.Errorf("client registration failed: %w", err)
+			return nil, fmt.Errorf("client registration failed: %w\n\nTo use a pre-registered OAuth app, pass --client-id (and --client-secret if needed)", err)
 		}
 		clientID = reg.ClientID
 		clientSecret = reg.ClientSecret
 	} else {
-		return nil, fmt.Errorf("authorization server does not support dynamic client registration")
+		return nil, fmt.Errorf("authorization server does not support dynamic client registration\n\nTo use a pre-registered OAuth app, pass --client-id (and --client-secret if needed)")
 	}
 
 	// Step 5: Generate PKCE
