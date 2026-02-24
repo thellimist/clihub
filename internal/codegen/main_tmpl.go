@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,9 +33,13 @@ var envKeys = {{quoteSlice .EnvKeys}}
 
 // --- Global flags ---
 var (
-	globalTimeout   int
-	globalOutput    string
-	globalAuthToken string
+	globalTimeout        int
+	globalOutput         string
+	globalAuthToken      string
+	globalAuthType       string
+	globalAuthHeaderName string
+	globalAuthUsername   string
+	globalAuthPassword   string
 )
 
 func main() {
@@ -48,6 +53,10 @@ func main() {
 	rootCmd.PersistentFlags().IntVarP(&globalTimeout, "timeout", "t", 30000, "per-call timeout in milliseconds")
 	rootCmd.PersistentFlags().StringVarP(&globalOutput, "output", "o", "text", "output format: text|json|markdown|raw")
 	rootCmd.PersistentFlags().StringVar(&globalAuthToken, "auth-token", "", "bearer token for authenticated MCP servers")
+	rootCmd.PersistentFlags().StringVar(&globalAuthType, "auth-type", "", "authentication type: bearer, api_key, basic, none")
+	rootCmd.PersistentFlags().StringVar(&globalAuthHeaderName, "auth-header-name", "", "custom header name for api_key auth (default X-API-Key)")
+	rootCmd.PersistentFlags().StringVar(&globalAuthUsername, "auth-username", "", "username for basic auth")
+	rootCmd.PersistentFlags().StringVar(&globalAuthPassword, "auth-password", "", "password for basic auth")
 
 {{- range .Tools}}
 	rootCmd.AddCommand(cmd{{funcName .Name}}())
@@ -142,13 +151,13 @@ func cmd{{funcName .Name}}() *cobra.Command {
 // --- MCP client via mcp-go SDK ---
 
 func callTool(toolName string, params map[string]interface{}) error {
-	token := lookupToken()
+	provider := resolveAuthProvider()
 
 	timeout := time.Duration(globalTimeout) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	c, err := createClient(token)
+	c, err := createClient(ctx, provider)
 	if err != nil {
 		return err
 	}
@@ -206,12 +215,13 @@ func callTool(toolName string, params map[string]interface{}) error {
 	return formatOutput(result, globalOutput)
 }
 
-func createClient(token string) (*mcpclient.Client, error) {
+func createClient(ctx context.Context, provider authProvider) (*mcpclient.Client, error) {
 {{- if .IsHTTP}}
 	var opts []transport.StreamableHTTPCOption
-	if token != "" {
-		opts = append(opts, transport.WithHTTPHeaders(map[string]string{
-			"Authorization": "Bearer " + token,
+	headers := provider.getHeaders(ctx)
+	if len(headers) > 0 {
+		opts = append(opts, transport.WithHTTPHeaderFunc(func(ctx context.Context) map[string]string {
+			return provider.getHeaders(ctx)
 		}))
 	}
 	return mcpclient.NewStreamableHttpClient(serverURL, opts...)
@@ -283,20 +293,68 @@ func extractText(result *mcp.CallToolResult) string {
 	return string(data)
 }
 
-// --- Auth ---
+// --- Auth provider dispatch ---
 
-func lookupToken() string {
-	// 1. Flag
+type authProvider interface {
+	getHeaders(ctx context.Context) map[string]string
+}
+
+type noAuthProvider struct{}
+func (p *noAuthProvider) getHeaders(_ context.Context) map[string]string { return nil }
+
+type bearerTokenProvider struct{ token string }
+func (p *bearerTokenProvider) getHeaders(_ context.Context) map[string]string {
+	if p.token == "" { return nil }
+	return map[string]string{"Authorization": "Bearer " + p.token}
+}
+
+type apiKeyProvider struct{ token, headerName string }
+func (p *apiKeyProvider) getHeaders(_ context.Context) map[string]string {
+	if p.token == "" { return nil }
+	name := p.headerName
+	if name == "" { name = "X-API-Key" }
+	return map[string]string{name: p.token}
+}
+
+type basicAuthProvider struct{ username, password string }
+func (p *basicAuthProvider) getHeaders(_ context.Context) map[string]string {
+	if p.username == "" && p.password == "" { return nil }
+	encoded := base64.StdEncoding.EncodeToString([]byte(p.username + ":" + p.password))
+	return map[string]string{"Authorization": "Basic " + encoded}
+}
+
+// resolveAuthProvider builds an auth provider using the following priority:
+//  1. --auth-type + auth flags → explicit provider
+//  2. --auth-token without --auth-type → bearer (backwards compat)
+//  3. CLIHUB_AUTH_TOKEN env var → bearer
+//  4. Credentials file → provider from stored auth_type
+//  5. No credentials → no auth
+func resolveAuthProvider() authProvider {
+	// 1. Explicit --auth-type
+	if globalAuthType != "" {
+		switch globalAuthType {
+		case "bearer", "bearer_token":
+			return &bearerTokenProvider{token: globalAuthToken}
+		case "api_key":
+			return &apiKeyProvider{token: globalAuthToken, headerName: globalAuthHeaderName}
+		case "basic", "basic_auth":
+			return &basicAuthProvider{username: globalAuthUsername, password: globalAuthPassword}
+		default:
+			return &noAuthProvider{}
+		}
+	}
+
+	// 2. --auth-token without --auth-type → infer bearer
 	if globalAuthToken != "" {
-		return globalAuthToken
+		return &bearerTokenProvider{token: globalAuthToken}
 	}
 
-	// 2. Environment variable
+	// 3. CLIHUB_AUTH_TOKEN env var
 	if token := os.Getenv("CLIHUB_AUTH_TOKEN"); token != "" {
-		return token
+		return &bearerTokenProvider{token: token}
 	}
 
-	// 3. Credentials file
+	// 4. Credentials file
 	credPath := os.Getenv("CLIHUB_CREDENTIALS_FILE")
 	if credPath == "" {
 		home, err := os.UserHomeDir()
@@ -309,25 +367,45 @@ func lookupToken() string {
 		if err == nil {
 			var creds struct {
 				Servers map[string]struct {
+					AuthType    string ` + "`" + `json:"auth_type"` + "`" + `
 					Type        string ` + "`" + `json:"type"` + "`" + `
 					Token       string ` + "`" + `json:"token"` + "`" + `
 					AccessToken string ` + "`" + `json:"access_token"` + "`" + `
+					HeaderName  string ` + "`" + `json:"header_name"` + "`" + `
+					Username    string ` + "`" + `json:"username"` + "`" + `
+					Password    string ` + "`" + `json:"password"` + "`" + `
 				} ` + "`" + `json:"servers"` + "`" + `
 			}
 			if json.Unmarshal(data, &creds) == nil {
 {{- if .IsHTTP}}
 				if s, ok := creds.Servers[serverURL]; ok {
-					if s.Type == "oauth" && s.AccessToken != "" {
-						return s.AccessToken
+					authType := s.AuthType
+					if authType == "" {
+						// v1 fallback
+						switch s.Type {
+						case "bearer": authType = "bearer_token"
+						case "oauth": authType = "oauth2"
+						default: authType = s.Type
+						}
 					}
-					return s.Token
+					switch authType {
+					case "bearer_token":
+						return &bearerTokenProvider{token: s.Token}
+					case "api_key":
+						return &apiKeyProvider{token: s.Token, headerName: s.HeaderName}
+					case "basic_auth":
+						return &basicAuthProvider{username: s.Username, password: s.Password}
+					case "oauth2":
+						return &bearerTokenProvider{token: s.AccessToken}
+					}
 				}
 {{- end}}
 			}
 		}
 	}
 
-	return ""
+	// 5. No auth
+	return &noAuthProvider{}
 }
 `
 
