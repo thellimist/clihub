@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-
-	"github.com/clihub/clihub/internal/oauth"
 )
 
 // OAuth2Provider provides OAuth2 authentication via stored tokens and
@@ -69,7 +67,7 @@ func (p *OAuth2Provider) OnUnauthorized(ctx context.Context, _ *http.Response) (
 
 	// Attempt refresh
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	tokenResp, err := oauth.RefreshAccessToken(ctx, httpClient, tokenEndpoint, sc.ClientID, sc.RefreshToken)
+	tokenResp, err := RefreshAccessToken(ctx, httpClient, tokenEndpoint, sc.ClientID, sc.RefreshToken)
 	if err != nil {
 		return false, fmt.Errorf("token refresh failed: %w", err)
 	}
@@ -99,14 +97,14 @@ func (p *OAuth2Provider) OnUnauthorized(ctx context.Context, _ *http.Response) (
 
 // RunInteractiveFlow runs the interactive OAuth2 browser flow and stores the tokens.
 func (p *OAuth2Provider) RunInteractiveFlow(ctx context.Context) (string, error) {
-	cfg := oauth.FlowConfig{
+	cfg := FlowConfig{
 		ServerURL:    p.ServerURL,
 		ClientID:     p.ClientID,
 		ClientSecret: p.ClientSecret,
 		Verbose:      p.Verbose,
 	}
 
-	tokens, err := oauth.Authenticate(ctx, cfg)
+	tokens, err := Authenticate(ctx, cfg)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +142,7 @@ func discoverTokenEndpoint(ctx context.Context, serverURL string) (string, error
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	// Try protected resource metadata first to find auth server
-	resMeta, err := oauth.FetchProtectedResourceMetadata(ctx, httpClient, serverURL)
+	resMeta, err := FetchProtectedResourceMetadata(ctx, httpClient, serverURL)
 	var authServerURL string
 	if err == nil && len(resMeta.AuthorizationServers) > 0 {
 		authServerURL = resMeta.AuthorizationServers[0]
@@ -154,7 +152,7 @@ func discoverTokenEndpoint(ctx context.Context, serverURL string) (string, error
 	}
 
 	// Fetch auth server metadata
-	authMeta, err := oauth.FetchAuthServerMetadata(ctx, httpClient, authServerURL)
+	authMeta, err := FetchAuthServerMetadata(ctx, httpClient, authServerURL)
 	if err != nil {
 		return "", fmt.Errorf("could not discover token endpoint: %w", err)
 	}

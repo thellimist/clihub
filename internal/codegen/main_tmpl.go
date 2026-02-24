@@ -9,6 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +23,7 @@ import (
 {{- end}}
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/cobra"
+	"golang.org/x/oauth2/google"
 )
 
 // --- Embedded server configuration ---
@@ -323,11 +327,185 @@ func (p *basicAuthProvider) getHeaders(_ context.Context) map[string]string {
 	return map[string]string{"Authorization": "Basic " + encoded}
 }
 
+type s2sOAuth2Provider struct {
+	clientID, clientSecret, tokenEndpoint string
+	cachedToken string
+}
+func (p *s2sOAuth2Provider) getHeaders(ctx context.Context) map[string]string {
+	if p.cachedToken == "" {
+		token, err := s2sAuthenticate(ctx, p.tokenEndpoint, p.clientID, p.clientSecret)
+		if err != nil {
+			return nil
+		}
+		p.cachedToken = token
+	}
+	return map[string]string{"Authorization": "Bearer " + p.cachedToken}
+}
+
+type googleSAProvider struct {
+	keyFile string
+	scopes  []string
+}
+func (p *googleSAProvider) getHeaders(ctx context.Context) map[string]string {
+	keyData, err := os.ReadFile(p.keyFile)
+	if err != nil { return nil }
+	scopes := p.scopes
+	if len(scopes) == 0 {
+		scopes = []string{"https://www.googleapis.com/auth/cloud-platform"}
+	}
+	creds, err := google.CredentialsFromJSON(ctx, keyData, scopes...)
+	if err != nil { return nil }
+	token, err := creds.TokenSource.Token()
+	if err != nil { return nil }
+	return map[string]string{"Authorization": "Bearer " + token.AccessToken}
+}
+
+// --- Credential store types ---
+
+type credentialsFile struct {
+	Servers map[string]serverCredential ` + "`" + `json:"servers"` + "`" + `
+}
+
+type serverCredential struct {
+	AuthType      string    ` + "`" + `json:"auth_type"` + "`" + `
+	Type          string    ` + "`" + `json:"type"` + "`" + `
+	Token         string    ` + "`" + `json:"token"` + "`" + `
+	AccessToken   string    ` + "`" + `json:"access_token"` + "`" + `
+	RefreshToken  string    ` + "`" + `json:"refresh_token"` + "`" + `
+	ExpiresAt     string    ` + "`" + `json:"expires_at"` + "`" + `
+	ClientID      string    ` + "`" + `json:"client_id"` + "`" + `
+	ClientSecret  string    ` + "`" + `json:"client_secret"` + "`" + `
+	TokenEndpoint string    ` + "`" + `json:"token_endpoint"` + "`" + `
+	HeaderName    string    ` + "`" + `json:"header_name"` + "`" + `
+	Username      string    ` + "`" + `json:"username"` + "`" + `
+	Password      string    ` + "`" + `json:"password"` + "`" + `
+	KeyFile       string    ` + "`" + `json:"key_file"` + "`" + `
+	Scopes        []string  ` + "`" + `json:"scopes"` + "`" + `
+}
+
+func (s serverCredential) resolveAuthType() string {
+	if s.AuthType != "" { return s.AuthType }
+	switch s.Type {
+	case "bearer": return "bearer_token"
+	case "oauth": return "oauth2"
+	default: return s.Type
+	}
+}
+
+func (s serverCredential) isExpired() bool {
+	if s.ExpiresAt == "" { return false }
+	t, err := time.Parse(time.RFC3339, s.ExpiresAt)
+	if err != nil { return false }
+	return time.Now().After(t)
+}
+
+// --- Token refresh ---
+
+func refreshOAuthToken(credPath, srvURL string, sc serverCredential) (string, error) {
+	if sc.RefreshToken == "" {
+		return "", fmt.Errorf("access token expired and no refresh token available. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", srvURL)
+	}
+	tokenEndpoint := sc.TokenEndpoint
+	if tokenEndpoint == "" {
+		return "", fmt.Errorf("access token expired and no token endpoint stored. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", srvURL)
+	}
+
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {sc.ClientID},
+		"refresh_token": {sc.RefreshToken},
+	}
+
+	resp, err := http.Post(tokenEndpoint, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("token refresh request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("token refresh failed (%d): %s. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", resp.StatusCode, string(body), srvURL)
+	}
+
+	var tokenResp struct {
+		AccessToken  string ` + "`" + `json:"access_token"` + "`" + `
+		RefreshToken string ` + "`" + `json:"refresh_token"` + "`" + `
+		ExpiresIn    int    ` + "`" + `json:"expires_in"` + "`" + `
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("parse refresh response: %w", err)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("refresh response missing access_token")
+	}
+
+	// Update credential store
+	data, err := os.ReadFile(credPath)
+	if err == nil {
+		var creds credentialsFile
+		if json.Unmarshal(data, &creds) == nil && creds.Servers != nil {
+			entry := creds.Servers[srvURL]
+			entry.AccessToken = tokenResp.AccessToken
+			if tokenResp.RefreshToken != "" {
+				entry.RefreshToken = tokenResp.RefreshToken
+			}
+			if tokenResp.ExpiresIn > 0 {
+				entry.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
+			}
+			creds.Servers[srvURL] = entry
+			if updated, err := json.MarshalIndent(creds, "", "  "); err == nil {
+				os.WriteFile(credPath, updated, 0600)
+			}
+		}
+	}
+
+	return tokenResp.AccessToken, nil
+}
+
+// --- S2S OAuth2 ---
+
+func s2sAuthenticate(ctx context.Context, tokenEndpoint, clientID, clientSecret string) (string, error) {
+	form := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("S2S token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("S2S token endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken string ` + "`" + `json:"access_token"` + "`" + `
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("parse S2S response: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("S2S response missing access_token")
+	}
+	return tokenResp.AccessToken, nil
+}
+
 // resolveAuthProvider builds an auth provider using the following priority:
 //  1. --auth-type + auth flags → explicit provider
 //  2. --auth-token without --auth-type → bearer (backwards compat)
 //  3. CLIHUB_AUTH_TOKEN env var → bearer
-//  4. Credentials file → provider from stored auth_type
+//  4. Credentials file → provider from stored auth_type (with token refresh)
 //  5. No credentials → no auth
 func resolveAuthProvider() authProvider {
 	// 1. Explicit --auth-type
@@ -365,29 +543,11 @@ func resolveAuthProvider() authProvider {
 	if credPath != "" {
 		data, err := os.ReadFile(credPath)
 		if err == nil {
-			var creds struct {
-				Servers map[string]struct {
-					AuthType    string ` + "`" + `json:"auth_type"` + "`" + `
-					Type        string ` + "`" + `json:"type"` + "`" + `
-					Token       string ` + "`" + `json:"token"` + "`" + `
-					AccessToken string ` + "`" + `json:"access_token"` + "`" + `
-					HeaderName  string ` + "`" + `json:"header_name"` + "`" + `
-					Username    string ` + "`" + `json:"username"` + "`" + `
-					Password    string ` + "`" + `json:"password"` + "`" + `
-				} ` + "`" + `json:"servers"` + "`" + `
-			}
-			if json.Unmarshal(data, &creds) == nil {
+			var creds credentialsFile
+			if json.Unmarshal(data, &creds) == nil && creds.Servers != nil {
 {{- if .IsHTTP}}
 				if s, ok := creds.Servers[serverURL]; ok {
-					authType := s.AuthType
-					if authType == "" {
-						// v1 fallback
-						switch s.Type {
-						case "bearer": authType = "bearer_token"
-						case "oauth": authType = "oauth2"
-						default: authType = s.Type
-						}
-					}
+					authType := s.resolveAuthType()
 					switch authType {
 					case "bearer_token":
 						return &bearerTokenProvider{token: s.Token}
@@ -396,7 +556,23 @@ func resolveAuthProvider() authProvider {
 					case "basic_auth":
 						return &basicAuthProvider{username: s.Username, password: s.Password}
 					case "oauth2":
-						return &bearerTokenProvider{token: s.AccessToken}
+						token := s.AccessToken
+						if s.isExpired() && s.RefreshToken != "" {
+							refreshed, err := refreshOAuthToken(credPath, serverURL, s)
+							if err != nil {
+								fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
+							} else {
+								token = refreshed
+							}
+						}
+						return &bearerTokenProvider{token: token}
+					case "s2s_oauth2":
+						return &s2sOAuth2Provider{
+							clientID: s.ClientID, clientSecret: s.ClientSecret,
+							tokenEndpoint: s.TokenEndpoint,
+						}
+					case "google_sa":
+						return &googleSAProvider{keyFile: s.KeyFile, scopes: s.Scopes}
 					}
 				}
 {{- end}}
@@ -416,5 +592,6 @@ go 1.23
 require (
 	github.com/mark3labs/mcp-go v0.44.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/oauth2 v0.35.0
 )
 `
