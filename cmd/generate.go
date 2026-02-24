@@ -230,6 +230,35 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
 			}
+		} else if isAuthError(err) && flagAuthType == "" && flagAuthToken == "" {
+			// No auth was specified and server returned 401 — try OAuth auto-detection
+			verbose("Server requires authentication, attempting auto-detection...")
+			oauthProvider := &auth.OAuth2Provider{
+				ServerURL: flagURL,
+				CredPath:  auth.DefaultCredentialsPath(),
+				Verbose: func(format string, args ...interface{}) {
+					verbose(format, args...)
+				},
+			}
+			token, oauthErr := oauthProvider.RunInteractiveFlow(ctx)
+			if oauthErr != nil {
+				return fmt.Errorf("server requires authentication (401)\n\nAuto-detection failed: %s\n\nProvide auth with --auth-token or --oauth", oauthErr)
+			}
+			info("OAuth tokens saved to %s", auth.DefaultCredentialsPath())
+			mcpClient.Close()
+			bearerProvider := &auth.BearerTokenProvider{Token: token}
+			mcpClient, err = createHTTPClient(bearerProvider)
+			if err != nil {
+				return err
+			}
+			defer mcpClient.Close()
+			if err := mcpClient.Start(ctx); err != nil {
+				return fmt.Errorf("failed to connect after OAuth: %s", err)
+			}
+			_, err = mcpClient.Initialize(ctx, initReq)
+			if err != nil {
+				return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+			}
 		} else {
 			return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
 		}
@@ -566,11 +595,21 @@ func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
 // auto-detection succeeds, nil if no auth is needed.
 func probeServerAuth(ctx context.Context, serverURL string) (auth.AuthProvider, error) {
 	verbose("Attempting unauthenticated connection...")
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", serverURL, nil)
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		// Don't follow redirects — we want to see the 401 directly
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	// Use POST to match MCP Streamable HTTP transport — servers may only
+	// enforce auth on POST, not GET (e.g. returning a web page for GET).
+	req, err := http.NewRequestWithContext(ctx, "POST", serverURL, strings.NewReader("{}"))
 	if err != nil {
 		return nil, nil // Can't probe; proceed without auth
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -597,40 +636,49 @@ func probeServerAuth(ctx context.Context, serverURL string) (auth.AuthProvider, 
 		return nil, fmt.Errorf("server returned 401 with unsupported auth scheme\n\nProvide authentication with --auth-type and --auth-token")
 	}
 
-	// Bearer challenge with resource_metadata → OAuth2 auto-detection
-	if bearer.ResourceMetadata != "" {
-		verbose("Detected auth type: oauth2 (from WWW-Authenticate header)")
-		verbose("Resource metadata URL: %s", bearer.ResourceMetadata)
-
-		credPath := auth.DefaultCredentialsPath()
-		oauthProvider := &auth.OAuth2Provider{
-			ServerURL:           serverURL,
-			CredPath:            credPath,
-			ResourceMetadataURL: bearer.ResourceMetadata,
-			Scope:               bearer.Scope,
-			Verbose: func(format string, args ...interface{}) {
-				verbose(format, args...)
-			},
+	// Bearer challenge → try OAuth2 auto-detection
+	// If resource_metadata URL is present, use it directly.
+	// Otherwise, try standard RFC 9728 discovery from the server URL.
+	resourceMetadataURL := bearer.ResourceMetadata
+	if resourceMetadataURL != "" {
+		verbose("Detected auth type: oauth2 (from WWW-Authenticate resource_metadata)")
+	} else {
+		// No resource_metadata hint — try standard well-known discovery
+		verbose("No resource_metadata in challenge, trying OAuth discovery...")
+		httpDiscovery := &http.Client{Timeout: 10 * time.Second}
+		_, discoveryErr := auth.FetchProtectedResourceMetadata(ctx, httpDiscovery, serverURL)
+		if discoveryErr != nil {
+			// Discovery failed — this isn't an OAuth server we can auto-detect
+			hint := "server requires Bearer token authentication"
+			if bearer.Scope != "" {
+				hint += fmt.Sprintf(" (scope: %s)", bearer.Scope)
+			}
+			if bearer.Realm != "" {
+				hint += fmt.Sprintf(" (realm: %s)", bearer.Realm)
+			}
+			return nil, fmt.Errorf("%s\n\nProvide a token with --auth-token, or use --oauth for OAuth-enabled servers", hint)
 		}
-
-		verbose("Starting OAuth flow...")
-		token, err := oauthProvider.RunInteractiveFlow(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("OAuth authentication failed: %w", err)
-		}
-		info("OAuth tokens saved to %s", credPath)
-		return &auth.BearerTokenProvider{Token: token}, nil
+		verbose("Detected auth type: oauth2 (from server metadata discovery)")
 	}
 
-	// Bearer challenge without resource_metadata → suggest --auth-token
-	hint := "server requires Bearer token authentication"
-	if bearer.Scope != "" {
-		hint += fmt.Sprintf(" (scope: %s)", bearer.Scope)
+	credPath := auth.DefaultCredentialsPath()
+	oauthProvider := &auth.OAuth2Provider{
+		ServerURL:           serverURL,
+		CredPath:            credPath,
+		ResourceMetadataURL: resourceMetadataURL,
+		Scope:               bearer.Scope,
+		Verbose: func(format string, args ...interface{}) {
+			verbose(format, args...)
+		},
 	}
-	if bearer.Realm != "" {
-		hint += fmt.Sprintf(" (realm: %s)", bearer.Realm)
+
+	verbose("Starting OAuth flow...")
+	token, err := oauthProvider.RunInteractiveFlow(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("OAuth authentication failed: %w", err)
 	}
-	return nil, fmt.Errorf("%s\n\nProvide a token with --auth-token, or use --oauth for OAuth-enabled servers", hint)
+	info("OAuth tokens saved to %s", credPath)
+	return &auth.BearerTokenProvider{Token: token}, nil
 }
 
 // createMCPClient creates the appropriate mcp-go client based on flags.
