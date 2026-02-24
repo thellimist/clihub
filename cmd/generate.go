@@ -14,7 +14,6 @@ import (
 	"github.com/clihub/clihub/internal/compile"
 	"github.com/clihub/clihub/internal/gocheck"
 	"github.com/clihub/clihub/internal/nameutil"
-	"github.com/clihub/clihub/internal/oauth"
 	"github.com/clihub/clihub/internal/schema"
 	"github.com/clihub/clihub/internal/toolfilter"
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -158,23 +157,71 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("MCP server did not respond within %dms", flagTimeout)
 		}
-		// If OAuth is enabled and we got an auth error, try the OAuth flow
-		if flagOAuth && isAuthError(err) {
+		// If using an interactive auth type and we got an auth error, run the flow
+		if isAuthError(err) && (flagAuthType == "oauth2" || flagAuthType == "dcr_oauth") {
 			verbose("Authentication required, starting OAuth flow...")
-			token, oauthErr := runOAuthFlow(ctx)
+			oauthProvider := &auth.OAuth2Provider{
+				ServerURL:    flagURL,
+				CredPath:     auth.DefaultCredentialsPath(),
+				ClientID:     flagClientID,
+				ClientSecret: flagClientSecret,
+				Verbose: func(format string, args ...interface{}) {
+					verbose(format, args...)
+				},
+			}
+			token, oauthErr := oauthProvider.RunInteractiveFlow(ctx)
 			if oauthErr != nil {
 				return fmt.Errorf("OAuth authentication failed: %w", oauthErr)
 			}
+			info("OAuth tokens saved to %s", auth.DefaultCredentialsPath())
 			// Recreate client with bearer provider for the new token
 			mcpClient.Close()
-			oauthProvider := &auth.BearerTokenProvider{Token: token}
-			mcpClient, err = createHTTPClient(oauthProvider)
+			bearerProvider := &auth.BearerTokenProvider{Token: token}
+			mcpClient, err = createHTTPClient(bearerProvider)
 			if err != nil {
 				return err
 			}
 			defer mcpClient.Close()
 			if err := mcpClient.Start(ctx); err != nil {
 				return fmt.Errorf("failed to connect after OAuth: %s", err)
+			}
+			_, err = mcpClient.Initialize(ctx, initReq)
+			if err != nil {
+				return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
+			}
+		} else if isAuthError(err) && flagAuthType == "s2s_oauth2" {
+			verbose("Authentication required, performing S2S OAuth2...")
+			s2sProvider := &auth.S2SOAuth2Provider{
+				ClientID:     flagClientID,
+				ClientSecret: flagClientSecret,
+				ServerURL:    flagURL,
+			}
+			token, s2sErr := s2sProvider.Authenticate(ctx)
+			if s2sErr != nil {
+				return fmt.Errorf("S2S OAuth2 authentication failed: %w", s2sErr)
+			}
+			// Save S2S credentials
+			credPath := auth.DefaultCredentialsPath()
+			creds, loadErr := auth.LoadCredentials(credPath)
+			if loadErr == nil {
+				creds.Servers[flagURL] = auth.ServerCredential{
+					AuthType:      "s2s_oauth2",
+					ClientID:      flagClientID,
+					ClientSecret:  flagClientSecret,
+					TokenEndpoint: s2sProvider.TokenEndpoint,
+				}
+				_ = auth.SaveCredentials(credPath, creds)
+			}
+			// Recreate client with bearer provider for the new token
+			mcpClient.Close()
+			bearerProvider := &auth.BearerTokenProvider{Token: token}
+			mcpClient, err = createHTTPClient(bearerProvider)
+			if err != nil {
+				return err
+			}
+			defer mcpClient.Close()
+			if err := mcpClient.Start(ctx); err != nil {
+				return fmt.Errorf("failed to connect after S2S auth: %s", err)
 			}
 			_, err = mcpClient.Initialize(ctx, initReq)
 			if err != nil {
@@ -425,13 +472,38 @@ func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
 // resolveAuthProvider builds an AuthProvider from flags and credential store.
 // Priority: --auth-type + flags → --auth-token (infer bearer) → env → credential file → no auth.
 func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
+	credPath := auth.DefaultCredentialsPath()
+	var verboseFn func(string, ...interface{})
+	if flagVerbose {
+		verboseFn = func(format string, args ...interface{}) {
+			verbose(format, args...)
+		}
+	}
+
 	// If --auth-type is explicitly set, use it with the provided credentials
 	if flagAuthType != "" {
-		cred := auth.ServerCredential{
-			Token:      flagAuthToken,
-			HeaderName: flagAuthHeaderName,
+		switch flagAuthType {
+		case "oauth2", "dcr_oauth":
+			return &auth.OAuth2Provider{
+				ServerURL:    serverURL,
+				CredPath:     credPath,
+				ClientID:     flagClientID,
+				ClientSecret: flagClientSecret,
+				Verbose:      verboseFn,
+			}, nil
+		case "s2s_oauth2":
+			return &auth.S2SOAuth2Provider{
+				ClientID:     flagClientID,
+				ClientSecret: flagClientSecret,
+				ServerURL:    serverURL,
+			}, nil
+		default:
+			cred := auth.ServerCredential{
+				Token:      flagAuthToken,
+				HeaderName: flagAuthHeaderName,
+			}
+			return auth.NewProvider(flagAuthType, cred)
 		}
-		return auth.NewProvider(flagAuthType, cred)
 	}
 
 	// If --auth-token is set without --auth-type, infer bearer (backwards compat)
@@ -445,18 +517,28 @@ func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
 	}
 
 	// Check credential store for this server URL
-	if serverURL != "" {
-		credPath := auth.DefaultCredentialsPath()
-		if credPath != "" {
-			creds, err := auth.LoadCredentials(credPath)
-			if err == nil {
-				sc, ok := creds.Servers[serverURL]
-				if ok {
-					authType := sc.ResolveAuthType()
-					if authType == "oauth2" {
-						// OAuth handled separately via --oauth flag
-						return &auth.BearerTokenProvider{Token: sc.AccessToken}, nil
-					}
+	if serverURL != "" && credPath != "" {
+		creds, err := auth.LoadCredentials(credPath)
+		if err == nil {
+			sc, ok := creds.Servers[serverURL]
+			if ok {
+				authType := sc.ResolveAuthType()
+				switch authType {
+				case "oauth2":
+					return &auth.OAuth2Provider{
+						ServerURL: serverURL,
+						CredPath:  credPath,
+						ClientID:  sc.ClientID,
+						Verbose:   verboseFn,
+					}, nil
+				case "s2s_oauth2":
+					return &auth.S2SOAuth2Provider{
+						ClientID:      sc.ClientID,
+						ClientSecret:  sc.ClientSecret,
+						TokenEndpoint: sc.TokenEndpoint,
+						ServerURL:     serverURL,
+					}, nil
+				default:
 					return auth.NewProvider(authType, sc)
 				}
 			}
@@ -516,40 +598,6 @@ func createHTTPClient(provider auth.AuthProvider) (*mcpclient.Client, error) {
 	return c, nil
 }
 
-// runOAuthFlow executes the OAuth authentication flow and returns the access token.
-func runOAuthFlow(ctx context.Context) (string, error) {
-	credPath := auth.DefaultCredentialsPath()
-	var verboseFn func(string, ...interface{})
-	if flagVerbose {
-		verboseFn = func(format string, args ...interface{}) {
-			verbose(format, args...)
-		}
-	}
-
-	cfg := oauth.FlowConfig{
-		ServerURL:    flagURL,
-		ClientID:     flagClientID,
-		ClientSecret: flagClientSecret,
-		Verbose:      verboseFn,
-	}
-
-	tokens, err := oauth.Authenticate(ctx, cfg)
-	if err != nil {
-		return "", err
-	}
-
-	// Save tokens to credential store
-	creds, loadErr := auth.LoadCredentials(credPath)
-	if loadErr == nil {
-		auth.SetOAuthTokens(creds, flagURL, tokens.AccessToken, tokens.RefreshToken, tokens.ClientID, tokens.Scope, &tokens.ExpiresAt)
-		if saveErr := auth.SaveCredentials(credPath, creds); saveErr == nil {
-			info("OAuth tokens saved to %s", credPath)
-		}
-	}
-
-	return tokens.AccessToken, nil
-}
-
 // isAuthError checks if an error indicates an authentication failure.
 func isAuthError(err error) bool {
 	if err == nil {
@@ -592,20 +640,38 @@ func validateFlags() error {
 		return fmt.Errorf("--verbose and --quiet cannot be used together")
 	}
 
-	if flagOAuth && flagStdio != "" {
-		return fmt.Errorf("--oauth is not supported for stdio servers")
+	// --oauth is a convenience alias for --auth-type oauth2
+	if flagOAuth {
+		if flagAuthType != "" && flagAuthType != "oauth2" {
+			return fmt.Errorf("--oauth conflicts with --auth-type %s", flagAuthType)
+		}
+		flagAuthType = "oauth2"
 	}
 
-	if (flagClientID != "" || flagClientSecret != "") && !flagOAuth {
-		return fmt.Errorf("--client-id and --client-secret require --oauth")
+	if (flagAuthType == "oauth2" || flagAuthType == "dcr_oauth") && flagStdio != "" {
+		return fmt.Errorf("--auth-type %s is not supported for stdio servers", flagAuthType)
+	}
+
+	if flagClientID != "" || flagClientSecret != "" {
+		switch flagAuthType {
+		case "oauth2", "dcr_oauth", "s2s_oauth2":
+			// valid
+		default:
+			return fmt.Errorf("--client-id and --client-secret require --auth-type oauth2, dcr_oauth, or s2s_oauth2")
+		}
+	}
+
+	if flagAuthType == "s2s_oauth2" && (flagClientID == "" || flagClientSecret == "") {
+		return fmt.Errorf("--auth-type s2s_oauth2 requires --client-id and --client-secret")
 	}
 
 	if flagAuthType != "" {
 		switch flagAuthType {
-		case "bearer", "bearer_token", "api_key", "basic", "basic_auth", "none", "no_auth":
+		case "bearer", "bearer_token", "api_key", "basic", "basic_auth", "none", "no_auth",
+			"oauth2", "dcr_oauth", "s2s_oauth2", "google_sa":
 			// valid
 		default:
-			return fmt.Errorf("invalid --auth-type %q: valid types are bearer, api_key, basic, none", flagAuthType)
+			return fmt.Errorf("invalid --auth-type %q: valid types are bearer, api_key, basic, oauth2, s2s_oauth2, dcr_oauth, google_sa, none", flagAuthType)
 		}
 	}
 
