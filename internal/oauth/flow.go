@@ -50,8 +50,13 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	} else {
 		resMeta, err = FetchProtectedResourceMetadata(ctx, cfg.HTTPClient, cfg.ServerURL)
 	}
+
+	// Fallback: if no protected resource metadata, use server root as auth server
 	if err != nil {
-		return nil, fmt.Errorf("OAuth discovery failed: %w", err)
+		log("Protected resource metadata not found, using server as auth server")
+		resMeta = &ProtectedResourceMetadata{
+			AuthorizationServers: []string{serverRoot(cfg.ServerURL)},
+		}
 	}
 
 	// Determine scope: explicit > resource metadata > auth server metadata > default
@@ -161,6 +166,16 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 
 	log("Authentication complete")
 	return tokens, nil
+}
+
+// serverRoot extracts the origin (scheme + host) from a URL.
+// e.g. "https://mcp.linear.app/sse" → "https://mcp.linear.app"
+func serverRoot(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 }
 
 func buildAuthorizationURL(endpoint, clientID, redirectURI, codeChallenge, state, scope string) (string, error) {
