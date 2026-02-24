@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // CredentialsFile represents the ~/.clihub/credentials.json file.
@@ -16,8 +17,13 @@ type CredentialsFile struct {
 
 // ServerCredential holds auth info for a single server.
 type ServerCredential struct {
-	Token string `json:"token"`
-	Type  string `json:"type"` // Always "bearer" for now
+	Type         string     `json:"type"`                    // "bearer" or "oauth"
+	Token        string     `json:"token,omitempty"`         // For bearer type
+	AccessToken  string     `json:"access_token,omitempty"`  // For oauth type
+	RefreshToken string     `json:"refresh_token,omitempty"` // For oauth type
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`    // For oauth type
+	ClientID     string     `json:"client_id,omitempty"`     // For oauth type
+	Scope        string     `json:"scope,omitempty"`         // For oauth type
 }
 
 // LoadCredentials reads and parses a credentials file at the given path.
@@ -64,6 +70,7 @@ func SaveCredentials(path string, creds *CredentialsFile) error {
 
 // GetToken returns the token for the given server URL, or an empty
 // string if the server is not found in the credentials.
+// For OAuth credentials, returns the access_token.
 func GetToken(creds *CredentialsFile, serverURL string) string {
 	if creds.Servers == nil {
 		return ""
@@ -72,7 +79,47 @@ func GetToken(creds *CredentialsFile, serverURL string) string {
 	if !ok {
 		return ""
 	}
+	if sc.Type == "oauth" {
+		return sc.AccessToken
+	}
 	return sc.Token
+}
+
+// GetOAuthCredential returns the full OAuth credential for the given server URL,
+// or nil if none exists or the type is not "oauth".
+func GetOAuthCredential(creds *CredentialsFile, serverURL string) *ServerCredential {
+	if creds.Servers == nil {
+		return nil
+	}
+	sc, ok := creds.Servers[serverURL]
+	if !ok || sc.Type != "oauth" {
+		return nil
+	}
+	return &sc
+}
+
+// SetOAuthTokens stores OAuth tokens for the given server URL.
+func SetOAuthTokens(creds *CredentialsFile, serverURL, accessToken, refreshToken, clientID, scope string, expiresAt *time.Time) {
+	if creds.Servers == nil {
+		creds.Servers = make(map[string]ServerCredential)
+	}
+	creds.Servers[serverURL] = ServerCredential{
+		Type:         "oauth",
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+		ClientID:     clientID,
+		Scope:        scope,
+	}
+}
+
+// IsTokenExpired returns true if the credential has an expires_at in the past.
+// Returns false if there is no expiry set.
+func IsTokenExpired(sc ServerCredential) bool {
+	if sc.ExpiresAt == nil {
+		return false
+	}
+	return time.Now().After(*sc.ExpiresAt)
 }
 
 // SetToken stores a bearer token for the given server URL. It

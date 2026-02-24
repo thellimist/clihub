@@ -11,14 +11,21 @@ import (
 	"strings"
 )
 
+// OAuthProvider handles OAuth authentication when the server returns 401.
+type OAuthProvider interface {
+	Authenticate(ctx context.Context, serverURL string) (string, error)
+}
+
 // HTTPTransport implements the Transport interface using Streamable HTTP.
 // It sends JSON-RPC requests as HTTP POST requests and handles both
 // application/json and text/event-stream responses.
 type HTTPTransport struct {
-	URL        string
-	AuthToken  string
-	httpClient *http.Client
-	sessionID  string
+	URL            string
+	AuthToken      string
+	httpClient     *http.Client
+	sessionID      string
+	oauthProvider  OAuthProvider
+	oauthAttempted bool
 }
 
 // NewHTTPTransport creates a new HTTPTransport targeting the given URL.
@@ -28,6 +35,18 @@ func NewHTTPTransport(url, authToken string) *HTTPTransport {
 		URL:        url,
 		AuthToken:  authToken,
 		httpClient: &http.Client{},
+	}
+}
+
+// NewHTTPTransportWithOAuth creates an HTTP transport with OAuth fallback.
+// If the server returns 401 and a provider is set, the provider's Authenticate
+// method is called and the request is retried with the obtained token.
+func NewHTTPTransportWithOAuth(url, authToken string, provider OAuthProvider) *HTTPTransport {
+	return &HTTPTransport{
+		URL:           url,
+		AuthToken:     authToken,
+		httpClient:    &http.Client{},
+		oauthProvider: provider,
 	}
 }
 
@@ -63,6 +82,19 @@ func (t *HTTPTransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPC
 	// Capture session ID from the response if present.
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 		t.sessionID = sid
+	}
+
+	// Handle 401 with OAuth fallback
+	if resp.StatusCode == http.StatusUnauthorized && t.oauthProvider != nil && !t.oauthAttempted {
+		resp.Body.Close()
+		t.oauthAttempted = true
+
+		token, err := t.oauthProvider.Authenticate(ctx, t.URL)
+		if err != nil {
+			return nil, fmt.Errorf("OAuth authentication failed: %w", err)
+		}
+		t.AuthToken = token
+		return t.Send(ctx, req)
 	}
 
 	if resp.StatusCode != http.StatusOK {

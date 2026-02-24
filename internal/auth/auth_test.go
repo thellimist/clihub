@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -188,6 +189,101 @@ func TestSetToken_NilServersMap(t *testing.T) {
 	got := GetToken(creds, "https://example.com")
 	if got != "tok" {
 		t.Errorf("GetToken = %q, want %q", got, "tok")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OAuth credential tests
+// ---------------------------------------------------------------------------
+
+func TestSetAndGetOAuthTokens(t *testing.T) {
+	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	exp := time.Now().Add(1 * time.Hour)
+	SetOAuthTokens(creds, "https://mcp.notion.com", "access-1", "refresh-1", "client-1", "mcp:tools", &exp)
+
+	sc := creds.Servers["https://mcp.notion.com"]
+	if sc.Type != "oauth" {
+		t.Errorf("Type = %q, want %q", sc.Type, "oauth")
+	}
+	if sc.AccessToken != "access-1" {
+		t.Errorf("AccessToken = %q, want %q", sc.AccessToken, "access-1")
+	}
+	if sc.RefreshToken != "refresh-1" {
+		t.Errorf("RefreshToken = %q, want %q", sc.RefreshToken, "refresh-1")
+	}
+	if sc.ClientID != "client-1" {
+		t.Errorf("ClientID = %q, want %q", sc.ClientID, "client-1")
+	}
+}
+
+func TestGetToken_OAuthType(t *testing.T) {
+	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	exp := time.Now().Add(1 * time.Hour)
+	SetOAuthTokens(creds, "https://mcp.example.com", "oauth-access", "refresh", "cid", "", &exp)
+
+	got := GetToken(creds, "https://mcp.example.com")
+	if got != "oauth-access" {
+		t.Errorf("GetToken = %q, want %q", got, "oauth-access")
+	}
+}
+
+func TestGetOAuthCredential(t *testing.T) {
+	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	exp := time.Now().Add(1 * time.Hour)
+	SetOAuthTokens(creds, "https://example.com", "a", "r", "c", "s", &exp)
+
+	sc := GetOAuthCredential(creds, "https://example.com")
+	if sc == nil {
+		t.Fatal("expected non-nil credential")
+	}
+	if sc.ClientID != "c" {
+		t.Errorf("ClientID = %q, want %q", sc.ClientID, "c")
+	}
+
+	// Bearer type should return nil
+	SetToken(creds, "https://bearer.com", "tok")
+	if got := GetOAuthCredential(creds, "https://bearer.com"); got != nil {
+		t.Error("expected nil for bearer credential")
+	}
+}
+
+func TestIsTokenExpired_NotExpired(t *testing.T) {
+	exp := time.Now().Add(1 * time.Hour)
+	sc := ServerCredential{ExpiresAt: &exp}
+	if IsTokenExpired(sc) {
+		t.Error("token should not be expired")
+	}
+}
+
+func TestIsTokenExpired_Expired(t *testing.T) {
+	exp := time.Now().Add(-1 * time.Hour)
+	sc := ServerCredential{ExpiresAt: &exp}
+	if !IsTokenExpired(sc) {
+		t.Error("token should be expired")
+	}
+}
+
+func TestIsTokenExpired_NoExpiry(t *testing.T) {
+	sc := ServerCredential{}
+	if IsTokenExpired(sc) {
+		t.Error("token without expiry should not be expired")
+	}
+}
+
+func TestCredentialsBackwardCompatibility(t *testing.T) {
+	// Old-style JSON with only token and type
+	data := `{"version":1,"servers":{"https://old.com":{"token":"old-tok","type":"bearer"}}}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	os.WriteFile(path, []byte(data), 0600)
+
+	creds, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := GetToken(creds, "https://old.com")
+	if got != "old-tok" {
+		t.Errorf("got %q, want %q", got, "old-tok")
 	}
 }
 

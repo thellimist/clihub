@@ -14,6 +14,7 @@ import (
 	"github.com/clihub/clihub/internal/gocheck"
 	"github.com/clihub/clihub/internal/mcp"
 	"github.com/clihub/clihub/internal/nameutil"
+	"github.com/clihub/clihub/internal/oauth"
 	"github.com/clihub/clihub/internal/schema"
 	"github.com/clihub/clihub/internal/toolfilter"
 	"github.com/spf13/cobra"
@@ -31,6 +32,7 @@ var (
 	flagTimeout         int
 	flagEnv             []string
 	flagSaveCredentials bool
+	flagOAuth           bool
 	flagVerbose         bool
 	flagQuiet           bool
 )
@@ -52,6 +54,9 @@ Examples:
 
   # With authentication
   clihub generate --url https://mcp.example.com/mcp --auth-token $TOKEN
+
+  # With OAuth authentication (interactive browser flow)
+  clihub generate --url https://mcp.notion.com/mcp --oauth
 
   # Cross-compile for multiple platforms
   clihub generate --url https://mcp.example.com/mcp --platform linux/amd64,darwin/arm64
@@ -79,6 +84,7 @@ func init() {
 	f.IntVar(&flagTimeout, "timeout", 30000, "timeout in milliseconds for MCP connection")
 	f.StringSliceVar(&flagEnv, "env", nil, "environment variables for stdio servers (KEY=VALUE, repeatable)")
 	f.BoolVar(&flagSaveCredentials, "save-credentials", false, "persist auth token to ~/.clihub/credentials.json")
+	f.BoolVar(&flagOAuth, "oauth", false, "use OAuth for authentication (interactive browser flow)")
 	f.BoolVar(&flagVerbose, "verbose", false, "show detailed progress during generation")
 	f.BoolVar(&flagQuiet, "quiet", false, "suppress all output except errors")
 }
@@ -351,6 +357,40 @@ func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
 // createTransport creates the appropriate MCP transport based on flags.
 func createTransport() (mcp.Transport, string, error) {
 	if flagURL != "" {
+		if flagOAuth {
+			credPath := auth.DefaultCredentialsPath()
+			var verboseFn func(string, ...interface{})
+			if flagVerbose {
+				verboseFn = func(format string, args ...interface{}) {
+					verbose(format, args...)
+				}
+			}
+			provider := &oauth.Provider{
+				Verbose: verboseFn,
+				OnTokens: func(serverURL string, tokens *oauth.OAuthTokens) {
+					creds, err := auth.LoadCredentials(credPath)
+					if err != nil {
+						return
+					}
+					auth.SetOAuthTokens(creds, serverURL, tokens.AccessToken, tokens.RefreshToken, tokens.ClientID, tokens.Scope, &tokens.ExpiresAt)
+					auth.SaveCredentials(credPath, creds)
+					info("OAuth tokens saved to %s", credPath)
+				},
+			}
+
+			// Check for cached token
+			token := flagAuthToken
+			if token == "" {
+				creds, err := auth.LoadCredentials(credPath)
+				if err == nil {
+					token = auth.GetToken(creds, flagURL)
+				}
+			}
+
+			transport := mcp.NewHTTPTransportWithOAuth(flagURL, token, provider)
+			return transport, flagURL, nil
+		}
+
 		transport := mcp.NewHTTPTransport(flagURL, flagAuthToken)
 		return transport, flagURL, nil
 	}
@@ -405,6 +445,10 @@ func validateFlags() error {
 
 	if flagVerbose && flagQuiet {
 		return fmt.Errorf("--verbose and --quiet cannot be used together")
+	}
+
+	if flagOAuth && flagStdio != "" {
+		return fmt.Errorf("--oauth is not supported for stdio servers")
 	}
 
 	for _, env := range flagEnv {
