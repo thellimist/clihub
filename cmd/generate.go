@@ -33,6 +33,7 @@ var (
 	flagAuthToken       string
 	flagAuthType        string
 	flagAuthHeaderName  string
+	flagAuthKeyFile     string
 	flagTimeout         int
 	flagEnv             []string
 	flagSaveCredentials bool
@@ -89,6 +90,7 @@ func init() {
 	f.StringVar(&flagAuthToken, "auth-token", "", "bearer token for authenticated MCP servers")
 	f.StringVar(&flagAuthType, "auth-type", "", "authentication type: bearer, api_key, basic, none")
 	f.StringVar(&flagAuthHeaderName, "auth-header-name", "", "custom header name for api_key auth (default X-API-Key)")
+	f.StringVar(&flagAuthKeyFile, "auth-key-file", "", "path to Google service account JSON key file")
 	f.IntVar(&flagTimeout, "timeout", 30000, "timeout in milliseconds for MCP connection")
 	f.StringSliceVar(&flagEnv, "env", nil, "environment variables for stdio servers (KEY=VALUE, repeatable)")
 	f.BoolVar(&flagSaveCredentials, "save-credentials", false, "persist auth token to ~/.clihub/credentials.json")
@@ -497,6 +499,10 @@ func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
 				ClientSecret: flagClientSecret,
 				ServerURL:    serverURL,
 			}, nil
+		case "google_sa":
+			return &auth.GoogleSAProvider{
+				KeyFile: flagAuthKeyFile,
+			}, nil
 		default:
 			cred := auth.ServerCredential{
 				Token:      flagAuthToken,
@@ -537,6 +543,11 @@ func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
 						ClientSecret:  sc.ClientSecret,
 						TokenEndpoint: sc.TokenEndpoint,
 						ServerURL:     serverURL,
+					}, nil
+				case "google_sa":
+					return &auth.GoogleSAProvider{
+						KeyFile: sc.KeyFile,
+						Scopes:  sc.Scopes,
 					}, nil
 				default:
 					return auth.NewProvider(authType, sc)
@@ -677,6 +688,14 @@ func validateFlags() error {
 
 	if flagAuthHeaderName != "" && flagAuthType != "api_key" {
 		return fmt.Errorf("--auth-header-name requires --auth-type api_key")
+	}
+
+	if flagAuthKeyFile != "" && flagAuthType != "google_sa" {
+		return fmt.Errorf("--auth-key-file requires --auth-type google_sa")
+	}
+
+	if flagAuthType == "google_sa" && flagAuthKeyFile == "" {
+		return fmt.Errorf("--auth-type google_sa requires --auth-key-file")
 	}
 
 	for _, env := range flagEnv {
