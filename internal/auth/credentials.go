@@ -11,8 +11,8 @@ import (
 
 // CredentialsFile represents the ~/.clihub/credentials.json file.
 type CredentialsFile struct {
-	Version int                          `json:"version"`
-	Servers map[string]ServerCredential  `json:"servers"`
+	Version int                         `json:"version"`
+	Servers map[string]ServerCredential `json:"servers"`
 }
 
 // ServerCredential holds auth info for a single server.
@@ -47,15 +47,32 @@ type ServerCredential struct {
 	Scopes  []string `json:"scopes,omitempty"`
 }
 
+// ResolveAuthType returns the effective auth type, handling both v1 and v2 schemas.
+func (sc *ServerCredential) ResolveAuthType() string {
+	if sc.AuthType != "" {
+		return sc.AuthType
+	}
+	// v1 fallback
+	switch sc.Type {
+	case "bearer":
+		return "bearer_token"
+	case "oauth":
+		return "oauth2"
+	default:
+		return sc.Type
+	}
+}
+
 // LoadCredentials reads and parses a credentials file at the given path.
 // If the file does not exist, it returns an empty CredentialsFile with
-// Version=1 and an empty Servers map (not an error).
+// Version=2 and an empty Servers map (not an error).
+// v1 credentials are auto-migrated to v2 on load.
 func LoadCredentials(path string) (*CredentialsFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return &CredentialsFile{
-				Version: 1,
+				Version: 2,
 				Servers: make(map[string]ServerCredential),
 			}, nil
 		}
@@ -69,7 +86,36 @@ func LoadCredentials(path string) (*CredentialsFile, error) {
 	if creds.Servers == nil {
 		creds.Servers = make(map[string]ServerCredential)
 	}
+
+	// Auto-migrate v1 → v2
+	if creds.Version < 2 {
+		migrateV1ToV2(&creds)
+		// Save migrated file back (transparent upgrade)
+		_ = SaveCredentials(path, &creds)
+	}
+
 	return &creds, nil
+}
+
+// migrateV1ToV2 converts v1 credential entries to v2 format.
+func migrateV1ToV2(creds *CredentialsFile) {
+	creds.Version = 2
+	for url, sc := range creds.Servers {
+		if sc.AuthType != "" {
+			continue // Already v2
+		}
+		switch sc.Type {
+		case "bearer":
+			sc.AuthType = "bearer_token"
+		case "oauth":
+			sc.AuthType = "oauth2"
+		default:
+			if sc.Token != "" {
+				sc.AuthType = "bearer_token"
+			}
+		}
+		creds.Servers[url] = sc
+	}
 }
 
 // SaveCredentials writes the credentials to the given path. It creates
@@ -100,32 +146,40 @@ func GetToken(creds *CredentialsFile, serverURL string) string {
 	if !ok {
 		return ""
 	}
-	if sc.Type == "oauth" {
+	authType := sc.ResolveAuthType()
+	if authType == "oauth2" {
 		return sc.AccessToken
 	}
 	return sc.Token
 }
 
 // GetOAuthCredential returns the full OAuth credential for the given server URL,
-// or nil if none exists or the type is not "oauth".
+// or nil if none exists or the type is not oauth2.
 func GetOAuthCredential(creds *CredentialsFile, serverURL string) *ServerCredential {
 	if creds.Servers == nil {
 		return nil
 	}
 	sc, ok := creds.Servers[serverURL]
-	if !ok || sc.Type != "oauth" {
+	if !ok {
+		return nil
+	}
+	if sc.ResolveAuthType() != "oauth2" {
 		return nil
 	}
 	return &sc
 }
 
-// SetOAuthTokens stores OAuth tokens for the given server URL.
+// SetOAuthTokens stores OAuth tokens for the given server URL using v2 format.
 func SetOAuthTokens(creds *CredentialsFile, serverURL, accessToken, refreshToken, clientID, scope string, expiresAt *time.Time) {
 	if creds.Servers == nil {
 		creds.Servers = make(map[string]ServerCredential)
 	}
+	if creds.Version < 2 {
+		creds.Version = 2
+	}
 	creds.Servers[serverURL] = ServerCredential{
-		Type:         "oauth",
+		AuthType:     "oauth2",
+		Type:         "oauth", // kept for any v1 readers
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		ExpiresAt:    expiresAt,
@@ -143,14 +197,17 @@ func IsTokenExpired(sc ServerCredential) bool {
 	return time.Now().After(*sc.ExpiresAt)
 }
 
-// SetToken stores a bearer token for the given server URL. It
-// initializes the Servers map if it is nil.
+// SetToken stores a bearer token for the given server URL using v2 format.
 func SetToken(creds *CredentialsFile, serverURL, token string) {
 	if creds.Servers == nil {
 		creds.Servers = make(map[string]ServerCredential)
 	}
+	if creds.Version < 2 {
+		creds.Version = 2
+	}
 	creds.Servers[serverURL] = ServerCredential{
-		Token: token,
-		Type:  "bearer",
+		AuthType: "bearer_token",
+		Type:     "bearer", // kept for any v1 readers
+		Token:    token,
 	}
 }

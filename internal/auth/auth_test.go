@@ -17,17 +17,9 @@ func TestLoadCredentials_ValidFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "credentials.json")
 
-	want := &CredentialsFile{
-		Version: 1,
-		Servers: map[string]ServerCredential{
-			"https://mcp.example.com": {Token: "tok123", Type: "bearer"},
-		},
-	}
-	data, err := json.MarshalIndent(want, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	// Write a v1 file — should be auto-migrated to v2 on load
+	v1Data := `{"version":1,"servers":{"https://mcp.example.com":{"token":"tok123","type":"bearer"}}}`
+	if err := os.WriteFile(path, []byte(v1Data), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,8 +27,8 @@ func TestLoadCredentials_ValidFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCredentials returned error: %v", err)
 	}
-	if got.Version != want.Version {
-		t.Errorf("Version = %d, want %d", got.Version, want.Version)
+	if got.Version != 2 {
+		t.Errorf("Version = %d, want 2 (auto-migrated)", got.Version)
 	}
 	sc, ok := got.Servers["https://mcp.example.com"]
 	if !ok {
@@ -45,8 +37,8 @@ func TestLoadCredentials_ValidFile(t *testing.T) {
 	if sc.Token != "tok123" {
 		t.Errorf("Token = %q, want %q", sc.Token, "tok123")
 	}
-	if sc.Type != "bearer" {
-		t.Errorf("Type = %q, want %q", sc.Type, "bearer")
+	if sc.AuthType != "bearer_token" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "bearer_token")
 	}
 }
 
@@ -58,8 +50,8 @@ func TestLoadCredentials_NonExistentFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCredentials returned error for missing file: %v", err)
 	}
-	if got.Version != 1 {
-		t.Errorf("Version = %d, want 1", got.Version)
+	if got.Version != 2 {
+		t.Errorf("Version = %d, want 2", got.Version)
 	}
 	if got.Servers == nil {
 		t.Fatal("Servers map is nil, want empty map")
@@ -92,9 +84,9 @@ func TestSaveCredentials_CreatesDirectory(t *testing.T) {
 	path := filepath.Join(dir, "sub", "dir", "credentials.json")
 
 	creds := &CredentialsFile{
-		Version: 1,
+		Version: 2,
 		Servers: map[string]ServerCredential{
-			"https://example.com": {Token: "abc", Type: "bearer"},
+			"https://example.com": {AuthType: "bearer_token", Token: "abc"},
 		},
 	}
 	if err := SaveCredentials(path, creds); err != nil {
@@ -110,8 +102,8 @@ func TestSaveCredentials_CreatesDirectory(t *testing.T) {
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		t.Fatalf("cannot parse saved file: %v", err)
 	}
-	if loaded.Version != 1 {
-		t.Errorf("Version = %d, want 1", loaded.Version)
+	if loaded.Version != 2 {
+		t.Errorf("Version = %d, want 2", loaded.Version)
 	}
 	if loaded.Servers["https://example.com"].Token != "abc" {
 		t.Errorf("Token = %q, want %q", loaded.Servers["https://example.com"].Token, "abc")
@@ -122,7 +114,7 @@ func TestSaveCredentials_FilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "credentials.json")
 
-	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	creds := &CredentialsFile{Version: 2, Servers: make(map[string]ServerCredential)}
 	if err := SaveCredentials(path, creds); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +135,7 @@ func TestSaveCredentials_FilePermissions(t *testing.T) {
 
 func TestSetAndGetToken(t *testing.T) {
 	creds := &CredentialsFile{
-		Version: 1,
+		Version: 2,
 		Servers: make(map[string]ServerCredential),
 	}
 	SetToken(creds, "https://example.com", "mytoken")
@@ -153,16 +145,16 @@ func TestSetAndGetToken(t *testing.T) {
 		t.Errorf("GetToken = %q, want %q", got, "mytoken")
 	}
 
-	// Verify type is set correctly.
+	// Verify auth_type is set correctly (v2).
 	sc := creds.Servers["https://example.com"]
-	if sc.Type != "bearer" {
-		t.Errorf("Type = %q, want %q", sc.Type, "bearer")
+	if sc.AuthType != "bearer_token" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "bearer_token")
 	}
 }
 
 func TestGetToken_EmptyMap(t *testing.T) {
 	creds := &CredentialsFile{
-		Version: 1,
+		Version: 2,
 		Servers: make(map[string]ServerCredential),
 	}
 	got := GetToken(creds, "https://nonexistent.com")
@@ -172,7 +164,7 @@ func TestGetToken_EmptyMap(t *testing.T) {
 }
 
 func TestGetToken_NilMap(t *testing.T) {
-	creds := &CredentialsFile{Version: 1}
+	creds := &CredentialsFile{Version: 2}
 	got := GetToken(creds, "https://example.com")
 	if got != "" {
 		t.Errorf("GetToken with nil map = %q, want empty string", got)
@@ -180,7 +172,7 @@ func TestGetToken_NilMap(t *testing.T) {
 }
 
 func TestSetToken_NilServersMap(t *testing.T) {
-	creds := &CredentialsFile{Version: 1}
+	creds := &CredentialsFile{Version: 2}
 	SetToken(creds, "https://example.com", "tok")
 
 	if creds.Servers == nil {
@@ -197,13 +189,13 @@ func TestSetToken_NilServersMap(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSetAndGetOAuthTokens(t *testing.T) {
-	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	creds := &CredentialsFile{Version: 2, Servers: make(map[string]ServerCredential)}
 	exp := time.Now().Add(1 * time.Hour)
 	SetOAuthTokens(creds, "https://mcp.notion.com", "access-1", "refresh-1", "client-1", "mcp:tools", &exp)
 
 	sc := creds.Servers["https://mcp.notion.com"]
-	if sc.Type != "oauth" {
-		t.Errorf("Type = %q, want %q", sc.Type, "oauth")
+	if sc.AuthType != "oauth2" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "oauth2")
 	}
 	if sc.AccessToken != "access-1" {
 		t.Errorf("AccessToken = %q, want %q", sc.AccessToken, "access-1")
@@ -217,7 +209,7 @@ func TestSetAndGetOAuthTokens(t *testing.T) {
 }
 
 func TestGetToken_OAuthType(t *testing.T) {
-	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	creds := &CredentialsFile{Version: 2, Servers: make(map[string]ServerCredential)}
 	exp := time.Now().Add(1 * time.Hour)
 	SetOAuthTokens(creds, "https://mcp.example.com", "oauth-access", "refresh", "cid", "", &exp)
 
@@ -228,7 +220,7 @@ func TestGetToken_OAuthType(t *testing.T) {
 }
 
 func TestGetOAuthCredential(t *testing.T) {
-	creds := &CredentialsFile{Version: 1, Servers: make(map[string]ServerCredential)}
+	creds := &CredentialsFile{Version: 2, Servers: make(map[string]ServerCredential)}
 	exp := time.Now().Add(1 * time.Hour)
 	SetOAuthTokens(creds, "https://example.com", "a", "r", "c", "s", &exp)
 
@@ -271,7 +263,7 @@ func TestIsTokenExpired_NoExpiry(t *testing.T) {
 }
 
 func TestCredentialsBackwardCompatibility(t *testing.T) {
-	// Old-style JSON with only token and type
+	// Old-style v1 JSON with only token and type — should auto-migrate to v2
 	data := `{"version":1,"servers":{"https://old.com":{"token":"old-tok","type":"bearer"}}}`
 	dir := t.TempDir()
 	path := filepath.Join(dir, "creds.json")
@@ -281,9 +273,71 @@ func TestCredentialsBackwardCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if creds.Version != 2 {
+		t.Errorf("Version = %d, want 2 (auto-migrated)", creds.Version)
+	}
 	got := GetToken(creds, "https://old.com")
 	if got != "old-tok" {
 		t.Errorf("got %q, want %q", got, "old-tok")
+	}
+	sc := creds.Servers["https://old.com"]
+	if sc.AuthType != "bearer_token" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "bearer_token")
+	}
+}
+
+func TestV1OAuthMigration(t *testing.T) {
+	data := `{"version":1,"servers":{"https://mcp.notion.com":{"type":"oauth","access_token":"at","refresh_token":"rt","client_id":"cid","scope":"mcp:tools"}}}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	os.WriteFile(path, []byte(data), 0600)
+
+	creds, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.Version != 2 {
+		t.Errorf("Version = %d, want 2", creds.Version)
+	}
+	sc := creds.Servers["https://mcp.notion.com"]
+	if sc.AuthType != "oauth2" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "oauth2")
+	}
+	if sc.AccessToken != "at" {
+		t.Errorf("AccessToken = %q, want %q", sc.AccessToken, "at")
+	}
+	if sc.RefreshToken != "rt" {
+		t.Errorf("RefreshToken = %q, want %q", sc.RefreshToken, "rt")
+	}
+	got := GetToken(creds, "https://mcp.notion.com")
+	if got != "at" {
+		t.Errorf("GetToken = %q, want %q", got, "at")
+	}
+}
+
+func TestV2Format(t *testing.T) {
+	// Test that a v2 file loads without migration
+	data := `{"version":2,"servers":{"https://api.example.com":{"auth_type":"api_key","token":"key123","header_name":"X-Auth"}}}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	os.WriteFile(path, []byte(data), 0600)
+
+	creds, err := LoadCredentials(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.Version != 2 {
+		t.Errorf("Version = %d, want 2", creds.Version)
+	}
+	sc := creds.Servers["https://api.example.com"]
+	if sc.AuthType != "api_key" {
+		t.Errorf("AuthType = %q, want %q", sc.AuthType, "api_key")
+	}
+	if sc.Token != "key123" {
+		t.Errorf("Token = %q, want %q", sc.Token, "key123")
+	}
+	if sc.HeaderName != "X-Auth" {
+		t.Errorf("HeaderName = %q, want %q", sc.HeaderName, "X-Auth")
 	}
 }
 
