@@ -67,7 +67,7 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	defer callback.Close()
 
 	// Step 4: Register client (if registration endpoint available)
-	var clientID string
+	var clientID, clientSecret string
 	if authMeta.RegistrationEndpoint != "" {
 		log("Registering OAuth client...")
 		reg, err := RegisterClient(ctx, cfg.HTTPClient, authMeta.RegistrationEndpoint, callback.RedirectURI(), scope)
@@ -75,6 +75,7 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 			return nil, fmt.Errorf("client registration failed: %w", err)
 		}
 		clientID = reg.ClientID
+		clientSecret = reg.ClientSecret
 	} else {
 		return nil, fmt.Errorf("authorization server does not support dynamic client registration")
 	}
@@ -119,7 +120,9 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 		Code:         code,
 		RedirectURI:  callback.RedirectURI(),
 		ClientID:     clientID,
+		ClientSecret: clientSecret,
 		CodeVerifier: verifier,
+		AuthMethods:  authMeta.TokenEndpointAuthMethodsSupported,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("token exchange failed: %w", err)

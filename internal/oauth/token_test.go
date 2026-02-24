@@ -86,6 +86,64 @@ func TestExchangeCode_VerifyFormParams(t *testing.T) {
 	})
 }
 
+func TestExchangeCode_ClientSecretPost(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.Form.Get("client_secret") != "my-secret" {
+			t.Errorf("expected client_secret 'my-secret', got %q", r.Form.Get("client_secret"))
+		}
+		if r.Form.Get("client_id") != "my-client" {
+			t.Errorf("expected client_id 'my-client', got %q", r.Form.Get("client_id"))
+		}
+		json.NewEncoder(w).Encode(TokenResponse{AccessToken: "ok", TokenType: "Bearer"})
+	}))
+	defer ts.Close()
+
+	resp, err := ExchangeCode(context.Background(), ts.Client(), ts.URL, TokenExchangeParams{
+		Code:         "c",
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     "my-client",
+		ClientSecret: "my-secret",
+		CodeVerifier: "v",
+		AuthMethods:  []string{"client_secret_post"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.AccessToken != "ok" {
+		t.Errorf("got %q, want %q", resp.AccessToken, "ok")
+	}
+}
+
+func TestExchangeCode_ClientSecretBasic(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok {
+			t.Error("expected basic auth")
+		}
+		if user != "my-client" || pass != "my-secret" {
+			t.Errorf("unexpected basic auth: %q:%q", user, pass)
+		}
+		json.NewEncoder(w).Encode(TokenResponse{AccessToken: "ok", TokenType: "Bearer"})
+	}))
+	defer ts.Close()
+
+	resp, err := ExchangeCode(context.Background(), ts.Client(), ts.URL, TokenExchangeParams{
+		Code:         "c",
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     "my-client",
+		ClientSecret: "my-secret",
+		CodeVerifier: "v",
+		AuthMethods:  []string{"client_secret_basic"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.AccessToken != "ok" {
+		t.Errorf("got %q, want %q", resp.AccessToken, "ok")
+	}
+}
+
 func TestRefreshAccessToken_Success(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()

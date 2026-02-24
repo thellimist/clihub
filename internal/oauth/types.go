@@ -51,5 +51,7 @@ type TokenExchangeParams struct {
 	Code         string
 	RedirectURI  string
 	ClientID     string
+	ClientSecret string
 	CodeVerifier string
+	AuthMethods  []string // token_endpoint_auth_methods_supported from server metadata
 }
