@@ -11,6 +11,7 @@ Build `clihub generate` in 3 phases. One command that takes an MCP server URL or
 - [x] Phase 1: CLI Scaffold & MCP Connection
 - [x] Phase 2: Go Code Generation & Compilation
 - [x] Phase 3: Cross-Platform Output & Polish
+- [x] Phase 4: OAuth Authentication
 
 ## Phase Details
 
@@ -85,6 +86,30 @@ Build `clihub generate` in 3 phases. One command that takes an MCP server URL or
 7. `--output ./dist/my-tool` writes to custom directory
 8. `--platform foo/bar` → "Error: invalid platform 'foo/bar'. Valid targets: ..."
 
+### Phase 4: OAuth Authentication
+
+**Goal:** Full MCP OAuth support — browser-based authorization code flow with PKCE, dynamic client registration, and token persistence
+**Depends on:** Phase 1 (MCP transport), Phase 2 (credential storage)
+
+**Requirements:**
+- OAuth metadata discovery (RFC 8414 + RFC 9728)
+- Dynamic client registration (RFC 7591)
+- PKCE (RFC 7636) code_verifier/code_challenge
+- Local callback server for authorization redirect
+- Browser opening (darwin/linux/windows)
+- Token exchange and refresh
+- Credential storage extension for OAuth tokens
+- HTTP transport 401 interception and retry
+- `--oauth` flag on generate command
+
+**Success Criteria:**
+1. `clihub generate --url https://mcp.notion.com/mcp --oauth` opens browser, user authorizes, tools are discovered
+2. OAuth tokens persisted to `~/.clihub/credentials.json`
+3. Second run reuses cached token without browser
+4. Expired token triggers automatic refresh
+5. `--oauth` with `--stdio` produces clear error
+6. Existing `--auth-token` flow unaffected
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -92,6 +117,7 @@ Build `clihub generate` in 3 phases. One command that takes an MCP server URL or
 | 1 - CLI Scaffold & MCP Connection | 5/5 | built | 2026-02-23 |
 | 2 - Go Code Generation & Compilation | 4/4 | built | 2026-02-23 |
 | 3 - Cross-Platform Output & Polish | 2/2 | built | 2026-02-23 |
+| 4 - OAuth Authentication | 3/3 | built | 2026-02-24 |
 
 ---
 *Last updated: 2026-02-23 after Phase 3 implementation*
