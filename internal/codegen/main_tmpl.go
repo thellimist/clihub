@@ -491,12 +491,17 @@ func lookupToken() string {
 		if err == nil {
 			var creds struct {
 				Servers map[string]struct {
-					Token string ` + "`" + `json:"token"` + "`" + `
+					Type        string ` + "`" + `json:"type"` + "`" + `
+					Token       string ` + "`" + `json:"token"` + "`" + `
+					AccessToken string ` + "`" + `json:"access_token"` + "`" + `
 				} ` + "`" + `json:"servers"` + "`" + `
 			}
 			if json.Unmarshal(data, &creds) == nil {
 {{- if .IsHTTP}}
 				if s, ok := creds.Servers[serverURL]; ok {
+					if s.Type == "oauth" && s.AccessToken != "" {
+						return s.AccessToken
+					}
 					return s.Token
 				}
 {{- end}}
