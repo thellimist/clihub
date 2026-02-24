@@ -16,14 +16,35 @@ type CredentialsFile struct {
 }
 
 // ServerCredential holds auth info for a single server.
+// v2 schema uses AuthType to identify the provider; v1 used Type.
 type ServerCredential struct {
-	Type         string     `json:"type"`                    // "bearer" or "oauth"
-	Token        string     `json:"token,omitempty"`         // For bearer type
-	AccessToken  string     `json:"access_token,omitempty"`  // For oauth type
-	RefreshToken string     `json:"refresh_token,omitempty"` // For oauth type
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`    // For oauth type
-	ClientID     string     `json:"client_id,omitempty"`     // For oauth type
-	Scope        string     `json:"scope,omitempty"`         // For oauth type
+	// v2 field — identifies which AuthProvider to instantiate
+	AuthType string `json:"auth_type,omitempty"`
+	// v1 field — kept for backwards compat during migration
+	Type string `json:"type,omitempty"`
+
+	// bearer_token / api_key
+	Token      string `json:"token,omitempty"`
+	HeaderName string `json:"header_name,omitempty"` // api_key header name
+
+	// basic_auth
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+
+	// oauth2
+	AccessToken  string     `json:"access_token,omitempty"`
+	RefreshToken string     `json:"refresh_token,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	ClientID     string     `json:"client_id,omitempty"`
+	Scope        string     `json:"scope,omitempty"`
+
+	// s2s_oauth2
+	ClientSecret  string `json:"client_secret,omitempty"`
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+
+	// google_sa
+	KeyFile string   `json:"key_file,omitempty"`
+	Scopes  []string `json:"scopes,omitempty"`
 }
 
 // LoadCredentials reads and parses a credentials file at the given path.
