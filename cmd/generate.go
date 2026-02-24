@@ -129,7 +129,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("MCP server did not respond within %dms", flagTimeout)
 		}
-		return fmt.Errorf("MCP server at %s did not complete initialization handshake", target)
+		return fmt.Errorf("MCP server at %s did not complete initialization handshake\n  %s", target, err)
 	}
 	verbose("Handshake complete")
 

@@ -15,8 +15,9 @@ func TestFetchProtectedResourceMetadata_Success(t *testing.T) {
 		AuthorizationServers: []string{"https://auth.example.com"},
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/.well-known/oauth-protected-resource") {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+		if !strings.Contains(r.URL.Path, "/.well-known/oauth-protected-resource") {
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 		json.NewEncoder(w).Encode(meta)
 	}))
@@ -69,8 +70,9 @@ func TestFetchAuthServerMetadata_Success(t *testing.T) {
 		RegistrationEndpoint:  "https://auth.example.com/register",
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/.well-known/oauth-authorization-server") {
-			t.Errorf("unexpected path: %s", r.URL.Path)
+		if !strings.Contains(r.URL.Path, "/.well-known/oauth-authorization-server") {
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 		json.NewEncoder(w).Encode(meta)
 	}))
@@ -85,6 +87,59 @@ func TestFetchAuthServerMetadata_Success(t *testing.T) {
 	}
 	if got.TokenEndpoint != "https://auth.example.com/token" {
 		t.Errorf("unexpected token_endpoint: %s", got.TokenEndpoint)
+	}
+}
+
+func TestFetchAuthServerMetadata_WithPath(t *testing.T) {
+	// Simulates Stripe-like server: auth server at /mcp path, well-known at /mcp path
+	meta := AuthServerMetadata{
+		Issuer:                "https://auth.example.com/mcp",
+		AuthorizationEndpoint: "https://auth.example.com/mcp/authorize",
+		TokenEndpoint:         "https://auth.example.com/mcp/token",
+		RegistrationEndpoint:  "https://auth.example.com/mcp/register",
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only respond to the RFC-compliant path-appended URL
+		if r.URL.Path == "/.well-known/oauth-authorization-server/mcp" {
+			json.NewEncoder(w).Encode(meta)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	got, err := FetchAuthServerMetadata(context.Background(), ts.Client(), ts.URL+"/mcp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.AuthorizationEndpoint != "https://auth.example.com/mcp/authorize" {
+		t.Errorf("unexpected authorization_endpoint: %s", got.AuthorizationEndpoint)
+	}
+}
+
+func TestFetchAuthServerMetadata_FallbackToPathless(t *testing.T) {
+	// Simulates Notion-like server: auth server URL has no path, or path-appended returns 404
+	meta := AuthServerMetadata{
+		Issuer:                "https://auth.example.com",
+		AuthorizationEndpoint: "https://auth.example.com/authorize",
+		TokenEndpoint:         "https://auth.example.com/token",
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only respond to the path-less URL
+		if r.URL.Path == "/.well-known/oauth-authorization-server" {
+			json.NewEncoder(w).Encode(meta)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	got, err := FetchAuthServerMetadata(context.Background(), ts.Client(), ts.URL+"/mcp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.AuthorizationEndpoint != "https://auth.example.com/authorize" {
+		t.Errorf("unexpected authorization_endpoint: %s", got.AuthorizationEndpoint)
 	}
 }
 
@@ -103,24 +158,49 @@ func TestFetchAuthServerMetadata_MissingFields(t *testing.T) {
 	}
 }
 
-func TestWellKnownURL_Construction(t *testing.T) {
+func TestWellKnownURLs_Construction(t *testing.T) {
 	tests := []struct {
 		input string
-		want  string
+		want  []string
 	}{
-		{"https://mcp.notion.com/mcp", "https://mcp.notion.com/.well-known/oauth-protected-resource"},
-		{"https://api.example.com/v1/mcp", "https://api.example.com/.well-known/oauth-protected-resource"},
-		{"https://example.com", "https://example.com/.well-known/oauth-protected-resource"},
+		{
+			"https://example.com",
+			[]string{"https://example.com/.well-known/oauth-protected-resource"},
+		},
+		{
+			"https://example.com/",
+			[]string{"https://example.com/.well-known/oauth-protected-resource"},
+		},
+		{
+			"https://mcp.notion.com/mcp",
+			[]string{
+				"https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+				"https://mcp.notion.com/.well-known/oauth-protected-resource",
+			},
+		},
+		{
+			"https://access.stripe.com/mcp",
+			[]string{
+				"https://access.stripe.com/.well-known/oauth-protected-resource/mcp",
+				"https://access.stripe.com/.well-known/oauth-protected-resource",
+			},
+		},
 	}
 
 	for _, tt := range tests {
-		got, err := wellKnownURL(tt.input, "oauth-protected-resource")
+		got, err := wellKnownURLs(tt.input, "oauth-protected-resource")
 		if err != nil {
-			t.Errorf("wellKnownURL(%q): %v", tt.input, err)
+			t.Errorf("wellKnownURLs(%q): %v", tt.input, err)
 			continue
 		}
-		if got != tt.want {
-			t.Errorf("wellKnownURL(%q) = %q, want %q", tt.input, got, tt.want)
+		if len(got) != len(tt.want) {
+			t.Errorf("wellKnownURLs(%q) = %v (len %d), want %v (len %d)", tt.input, got, len(got), tt.want, len(tt.want))
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("wellKnownURLs(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+			}
 		}
 	}
 }

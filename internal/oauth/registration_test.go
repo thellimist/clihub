@@ -29,7 +29,7 @@ func TestRegisterClient_Success(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	reg, err := RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:9999/callback")
+	reg, err := RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:9999/callback", "mcp:tools")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestRegisterClient_ServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, err := RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:9999/callback")
+	_, err := RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:9999/callback", "mcp:tools")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -62,7 +62,7 @@ func TestRegisterClient_VerifyRequestBody(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:8080/callback")
+	RegisterClient(context.Background(), ts.Client(), ts.URL, "http://127.0.0.1:8080/callback", "mcp:tools")
 
 	if len(captured.RedirectURIs) != 1 || captured.RedirectURIs[0] != "http://127.0.0.1:8080/callback" {
 		t.Errorf("unexpected redirect_uris: %v", captured.RedirectURIs)

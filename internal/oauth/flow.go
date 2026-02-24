@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -40,12 +41,23 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 		return nil, fmt.Errorf("OAuth discovery failed: %w", err)
 	}
 
+	// Determine scope: prefer resource metadata, then auth server metadata, then default
+	scope := "mcp:tools"
+	if len(resMeta.ScopesSupported) > 0 {
+		scope = strings.Join(resMeta.ScopesSupported, " ")
+	}
+
 	// Step 2: Discover authorization server metadata
 	authMeta, err := FetchAuthServerMetadata(ctx, cfg.HTTPClient, resMeta.AuthorizationServers[0])
 	if err != nil {
 		return nil, fmt.Errorf("OAuth discovery failed: %w", err)
 	}
 	log("Found authorization server: %s", authMeta.Issuer)
+
+	// Override scope from auth server if resource didn't specify
+	if len(resMeta.ScopesSupported) == 0 && len(authMeta.ScopesSupported) > 0 {
+		scope = strings.Join(authMeta.ScopesSupported, " ")
+	}
 
 	// Step 3: Start callback server
 	callback := &CallbackServer{}
@@ -58,7 +70,7 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	var clientID string
 	if authMeta.RegistrationEndpoint != "" {
 		log("Registering OAuth client...")
-		reg, err := RegisterClient(ctx, cfg.HTTPClient, authMeta.RegistrationEndpoint, callback.RedirectURI())
+		reg, err := RegisterClient(ctx, cfg.HTTPClient, authMeta.RegistrationEndpoint, callback.RedirectURI(), scope)
 		if err != nil {
 			return nil, fmt.Errorf("client registration failed: %w", err)
 		}
@@ -81,7 +93,7 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	}
 
 	// Step 7: Build authorization URL
-	authURL, err := buildAuthorizationURL(authMeta.AuthorizationEndpoint, clientID, callback.RedirectURI(), challenge, state)
+	authURL, err := buildAuthorizationURL(authMeta.AuthorizationEndpoint, clientID, callback.RedirectURI(), challenge, state, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +140,7 @@ func Authenticate(ctx context.Context, cfg FlowConfig) (*OAuthTokens, error) {
 	return tokens, nil
 }
 
-func buildAuthorizationURL(endpoint, clientID, redirectURI, codeChallenge, state string) (string, error) {
+func buildAuthorizationURL(endpoint, clientID, redirectURI, codeChallenge, state, scope string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("parse authorization endpoint: %w", err)
@@ -141,7 +153,7 @@ func buildAuthorizationURL(endpoint, clientID, redirectURI, codeChallenge, state
 	q.Set("code_challenge", codeChallenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", state)
-	q.Set("scope", "mcp:tools")
+	q.Set("scope", scope)
 	u.RawQuery = q.Encode()
 
 	return u.String(), nil

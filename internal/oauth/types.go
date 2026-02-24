@@ -6,6 +6,7 @@ import "time"
 type ProtectedResourceMetadata struct {
 	Resource             string   `json:"resource"`
 	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported,omitempty"`
 }
 
 // AuthServerMetadata is the response from RFC 8414 discovery.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -18,14 +19,14 @@ type clientRegistrationRequest struct {
 }
 
 // RegisterClient performs RFC 7591 dynamic client registration.
-func RegisterClient(ctx context.Context, client *http.Client, registrationEndpoint, redirectURI string) (*ClientRegistration, error) {
+func RegisterClient(ctx context.Context, client *http.Client, registrationEndpoint, redirectURI, scope string) (*ClientRegistration, error) {
 	body := clientRegistrationRequest{
 		ClientName:              "clihub",
 		RedirectURIs:            []string{redirectURI},
 		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "none",
-		Scope:                   "mcp:tools",
+		Scope:                   scope,
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -46,7 +47,8 @@ func RegisterClient(ctx context.Context, client *http.Client, registrationEndpoi
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("client registration failed with status %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("client registration failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var reg ClientRegistration
