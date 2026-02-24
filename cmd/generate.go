@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
@@ -560,6 +561,78 @@ func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
 	return &auth.NoAuthProvider{}, nil
 }
 
+// probeServerAuth probes an HTTP URL for auth requirements by making a GET
+// request and inspecting the response. Returns a detected AuthProvider if
+// auto-detection succeeds, nil if no auth is needed.
+func probeServerAuth(ctx context.Context, serverURL string) (auth.AuthProvider, error) {
+	verbose("Attempting unauthenticated connection...")
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", serverURL, nil)
+	if err != nil {
+		return nil, nil // Can't probe; proceed without auth
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, nil // Network error; let mcp-go handle it
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		verbose("Server does not require authentication")
+		return nil, nil // No auth needed (or non-401 error; mcp-go will handle)
+	}
+
+	verbose("Server requires authentication (401)")
+
+	// Parse WWW-Authenticate header
+	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	if wwwAuth == "" {
+		return nil, fmt.Errorf("server returned 401 but no WWW-Authenticate header\n\nProvide authentication with --auth-type and --auth-token, or use --oauth for OAuth servers")
+	}
+
+	challenges := auth.ParseWWWAuthenticate(wwwAuth)
+	bearer := auth.FindBearerChallenge(challenges)
+	if bearer == nil {
+		return nil, fmt.Errorf("server returned 401 with unsupported auth scheme\n\nProvide authentication with --auth-type and --auth-token")
+	}
+
+	// Bearer challenge with resource_metadata → OAuth2 auto-detection
+	if bearer.ResourceMetadata != "" {
+		verbose("Detected auth type: oauth2 (from WWW-Authenticate header)")
+		verbose("Resource metadata URL: %s", bearer.ResourceMetadata)
+
+		credPath := auth.DefaultCredentialsPath()
+		oauthProvider := &auth.OAuth2Provider{
+			ServerURL:           serverURL,
+			CredPath:            credPath,
+			ResourceMetadataURL: bearer.ResourceMetadata,
+			Scope:               bearer.Scope,
+			Verbose: func(format string, args ...interface{}) {
+				verbose(format, args...)
+			},
+		}
+
+		verbose("Starting OAuth flow...")
+		token, err := oauthProvider.RunInteractiveFlow(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("OAuth authentication failed: %w", err)
+		}
+		info("OAuth tokens saved to %s", credPath)
+		return &auth.BearerTokenProvider{Token: token}, nil
+	}
+
+	// Bearer challenge without resource_metadata → suggest --auth-token
+	hint := "server requires Bearer token authentication"
+	if bearer.Scope != "" {
+		hint += fmt.Sprintf(" (scope: %s)", bearer.Scope)
+	}
+	if bearer.Realm != "" {
+		hint += fmt.Sprintf(" (realm: %s)", bearer.Realm)
+	}
+	return nil, fmt.Errorf("%s\n\nProvide a token with --auth-token, or use --oauth for OAuth-enabled servers", hint)
+}
+
 // createMCPClient creates the appropriate mcp-go client based on flags.
 func createMCPClient() (*mcpclient.Client, error) {
 	if flagURL != "" {
@@ -567,6 +640,20 @@ func createMCPClient() (*mcpclient.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("auth setup failed: %w", err)
 		}
+
+		// Auto-detect auth when no auth is configured (REQ-23)
+		if _, isNoAuth := provider.(*auth.NoAuthProvider); isNoAuth && !flagOAuth && flagAuthType == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(flagTimeout)*time.Millisecond)
+			defer cancel()
+			detected, probeErr := probeServerAuth(ctx, flagURL)
+			if probeErr != nil {
+				return nil, probeErr
+			}
+			if detected != nil {
+				provider = detected
+			}
+		}
+
 		return createHTTPClient(provider)
 	}
 

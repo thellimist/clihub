@@ -18,6 +18,10 @@ type OAuth2Provider struct {
 	ClientID string
 	// ClientSecret is a pre-registered OAuth client secret (optional).
 	ClientSecret string
+	// ResourceMetadataURL is a hint from the WWW-Authenticate header (auto-detection).
+	ResourceMetadataURL string
+	// Scope is a hint from the WWW-Authenticate header (auto-detection).
+	Scope string
 	// Verbose is an optional logging function.
 	Verbose func(format string, args ...interface{})
 
@@ -98,10 +102,12 @@ func (p *OAuth2Provider) OnUnauthorized(ctx context.Context, _ *http.Response) (
 // RunInteractiveFlow runs the interactive OAuth2 browser flow and stores the tokens.
 func (p *OAuth2Provider) RunInteractiveFlow(ctx context.Context) (string, error) {
 	cfg := FlowConfig{
-		ServerURL:    p.ServerURL,
-		ClientID:     p.ClientID,
-		ClientSecret: p.ClientSecret,
-		Verbose:      p.Verbose,
+		ServerURL:           p.ServerURL,
+		ClientID:            p.ClientID,
+		ClientSecret:        p.ClientSecret,
+		ResourceMetadataURL: p.ResourceMetadataURL,
+		Scope:               p.Scope,
+		Verbose:             p.Verbose,
 	}
 
 	tokens, err := Authenticate(ctx, cfg)
