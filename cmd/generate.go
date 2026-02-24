@@ -32,6 +32,8 @@ var (
 	flagIncludeTools    string
 	flagExcludeTools    string
 	flagAuthToken       string
+	flagAuthType        string
+	flagAuthHeaderName  string
 	flagTimeout         int
 	flagEnv             []string
 	flagSaveCredentials bool
@@ -86,6 +88,8 @@ func init() {
 	f.StringVar(&flagIncludeTools, "include-tools", "", "only include these tools (comma-separated)")
 	f.StringVar(&flagExcludeTools, "exclude-tools", "", "exclude these tools (comma-separated)")
 	f.StringVar(&flagAuthToken, "auth-token", "", "bearer token for authenticated MCP servers")
+	f.StringVar(&flagAuthType, "auth-type", "", "authentication type: bearer, api_key, basic, none")
+	f.StringVar(&flagAuthHeaderName, "auth-header-name", "", "custom header name for api_key auth (default X-API-Key)")
 	f.IntVar(&flagTimeout, "timeout", 30000, "timeout in milliseconds for MCP connection")
 	f.StringSliceVar(&flagEnv, "env", nil, "environment variables for stdio servers (KEY=VALUE, repeatable)")
 	f.BoolVar(&flagSaveCredentials, "save-credentials", false, "persist auth token to ~/.clihub/credentials.json")
@@ -161,9 +165,10 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			if oauthErr != nil {
 				return fmt.Errorf("OAuth authentication failed: %w", oauthErr)
 			}
-			// Recreate client with the new token
+			// Recreate client with bearer provider for the new token
 			mcpClient.Close()
-			mcpClient, err = createHTTPClient(token)
+			oauthProvider := &auth.BearerTokenProvider{Token: token}
+			mcpClient, err = createHTTPClient(oauthProvider)
 			if err != nil {
 				return err
 			}
@@ -244,20 +249,27 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 
 	// REQ-13a: Save credentials if requested
-	if flagSaveCredentials && flagAuthToken != "" {
-		serverURL := flagURL
-		if serverURL != "" {
-			credPath := auth.DefaultCredentialsPath()
-			creds, err := auth.LoadCredentials(credPath)
-			if err != nil {
-				return fmt.Errorf("load credentials: %w", err)
-			}
-			auth.SetToken(creds, serverURL, flagAuthToken)
-			if err := auth.SaveCredentials(credPath, creds); err != nil {
-				return fmt.Errorf("save credentials: %w", err)
-			}
-			info("Saved credentials to %s", credPath)
+	if flagSaveCredentials && flagURL != "" && flagAuthToken != "" {
+		credPath := auth.DefaultCredentialsPath()
+		creds, err := auth.LoadCredentials(credPath)
+		if err != nil {
+			return fmt.Errorf("load credentials: %w", err)
 		}
+		// Determine auth type: explicit --auth-type or infer bearer
+		saveAuthType := flagAuthType
+		if saveAuthType == "" {
+			saveAuthType = "bearer_token"
+		}
+		sc := auth.ServerCredential{
+			AuthType:   saveAuthType,
+			Token:      flagAuthToken,
+			HeaderName: flagAuthHeaderName,
+		}
+		creds.Servers[flagURL] = sc
+		if err := auth.SaveCredentials(credPath, creds); err != nil {
+			return fmt.Errorf("save credentials: %w", err)
+		}
+		info("Saved credentials to %s", credPath)
 	}
 
 	// Process tool schemas
@@ -410,20 +422,59 @@ func processToolSchemas(tools []mcp.Tool) ([]codegen.ToolDef, error) {
 	return defs, nil
 }
 
+// resolveAuthProvider builds an AuthProvider from flags and credential store.
+// Priority: --auth-type + flags → --auth-token (infer bearer) → env → credential file → no auth.
+func resolveAuthProvider(serverURL string) (auth.AuthProvider, error) {
+	// If --auth-type is explicitly set, use it with the provided credentials
+	if flagAuthType != "" {
+		cred := auth.ServerCredential{
+			Token:      flagAuthToken,
+			HeaderName: flagAuthHeaderName,
+		}
+		return auth.NewProvider(flagAuthType, cred)
+	}
+
+	// If --auth-token is set without --auth-type, infer bearer (backwards compat)
+	if flagAuthToken != "" {
+		return &auth.BearerTokenProvider{Token: flagAuthToken}, nil
+	}
+
+	// Check env var
+	if t := os.Getenv("CLIHUB_AUTH_TOKEN"); t != "" {
+		return &auth.BearerTokenProvider{Token: t}, nil
+	}
+
+	// Check credential store for this server URL
+	if serverURL != "" {
+		credPath := auth.DefaultCredentialsPath()
+		if credPath != "" {
+			creds, err := auth.LoadCredentials(credPath)
+			if err == nil {
+				sc, ok := creds.Servers[serverURL]
+				if ok {
+					authType := sc.ResolveAuthType()
+					if authType == "oauth2" {
+						// OAuth handled separately via --oauth flag
+						return &auth.BearerTokenProvider{Token: sc.AccessToken}, nil
+					}
+					return auth.NewProvider(authType, sc)
+				}
+			}
+		}
+	}
+
+	// No auth
+	return &auth.NoAuthProvider{}, nil
+}
+
 // createMCPClient creates the appropriate mcp-go client based on flags.
 func createMCPClient() (*mcpclient.Client, error) {
 	if flagURL != "" {
-		// Resolve auth token
-		token := flagAuthToken
-		if token == "" && flagOAuth {
-			// Try cached token first
-			credPath := auth.DefaultCredentialsPath()
-			creds, err := auth.LoadCredentials(credPath)
-			if err == nil {
-				token = auth.GetToken(creds, flagURL)
-			}
+		provider, err := resolveAuthProvider(flagURL)
+		if err != nil {
+			return nil, fmt.Errorf("auth setup failed: %w", err)
 		}
-		return createHTTPClient(token)
+		return createHTTPClient(provider)
 	}
 
 	// Stdio transport
@@ -448,12 +499,14 @@ func createMCPClient() (*mcpclient.Client, error) {
 	return c, nil
 }
 
-// createHTTPClient creates an HTTP-based mcp-go client with the given auth token.
-func createHTTPClient(token string) (*mcpclient.Client, error) {
+// createHTTPClient creates an HTTP-based mcp-go client with the given AuthProvider.
+func createHTTPClient(provider auth.AuthProvider) (*mcpclient.Client, error) {
 	var opts []transport.StreamableHTTPCOption
-	if token != "" {
-		opts = append(opts, transport.WithHTTPHeaders(map[string]string{
-			"Authorization": "Bearer " + token,
+	// Use WithHTTPHeaderFunc for dynamic per-request header injection
+	if _, isNoAuth := provider.(*auth.NoAuthProvider); !isNoAuth {
+		opts = append(opts, transport.WithHTTPHeaderFunc(func(ctx context.Context) map[string]string {
+			headers, _ := provider.GetHeaders(ctx)
+			return headers
 		}))
 	}
 	c, err := mcpclient.NewStreamableHttpClient(flagURL, opts...)
@@ -545,6 +598,19 @@ func validateFlags() error {
 
 	if (flagClientID != "" || flagClientSecret != "") && !flagOAuth {
 		return fmt.Errorf("--client-id and --client-secret require --oauth")
+	}
+
+	if flagAuthType != "" {
+		switch flagAuthType {
+		case "bearer", "bearer_token", "api_key", "basic", "basic_auth", "none", "no_auth":
+			// valid
+		default:
+			return fmt.Errorf("invalid --auth-type %q: valid types are bearer, api_key, basic, none", flagAuthType)
+		}
+	}
+
+	if flagAuthHeaderName != "" && flagAuthType != "api_key" {
+		return fmt.Errorf("--auth-header-name requires --auth-type api_key")
 	}
 
 	for _, env := range flagEnv {
