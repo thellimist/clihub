@@ -1,5 +1,9 @@
 # clihub
 
+<p align="center">
+  <img src="assets/cli_vs_mcp.png" alt="MCP vs CLI" width="600">
+</p>
+
 Turn any [MCP server](https://modelcontextprotocol.io/) into a compiled CLI binary. One command.
 
 ```
