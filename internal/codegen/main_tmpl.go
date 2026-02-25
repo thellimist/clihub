@@ -6,15 +6,34 @@ package main
 import (
 	"bytes"
 	"context"
+{{- if .IsHTTP}}
+	"crypto/rand"
+	"crypto/sha256"
+{{- end}}
 	"encoding/base64"
+{{- if .IsHTTP}}
+	"encoding/hex"
+{{- end}}
 	"encoding/json"
 	"fmt"
 	"io"
+{{- if .IsHTTP}}
+	"net"
+{{- end}}
 	"net/http"
 	"net/url"
 	"os"
+{{- if .IsHTTP}}
+	"os/exec"
+{{- end}}
 	"path/filepath"
+{{- if .IsHTTP}}
+	"runtime"
+{{- end}}
 	"strings"
+{{- if .IsHTTP}}
+	"sync"
+{{- end}}
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
@@ -64,6 +83,9 @@ func main() {
 
 {{- range .Tools}}
 	rootCmd.AddCommand(cmd{{funcName .Name}}())
+{{- end}}
+{{- if .IsHTTP}}
+	rootCmd.AddCommand(cmdAuth())
 {{- end}}
 
 	if err := rootCmd.Execute(); err != nil {
@@ -339,14 +361,18 @@ func (p *basicAuthProvider) getHeaders(_ context.Context) map[string]string {
 type s2sOAuth2Provider struct {
 	clientID, clientSecret, tokenEndpoint string
 	cachedToken string
+	expiresAt   time.Time
 }
 func (p *s2sOAuth2Provider) getHeaders(ctx context.Context) map[string]string {
-	if p.cachedToken == "" {
-		token, err := s2sAuthenticate(ctx, p.tokenEndpoint, p.clientID, p.clientSecret)
+	if p.cachedToken == "" || (!p.expiresAt.IsZero() && time.Now().After(p.expiresAt)) {
+		token, expiresIn, err := s2sAuthenticate(ctx, p.tokenEndpoint, p.clientID, p.clientSecret)
 		if err != nil {
 			return nil
 		}
 		p.cachedToken = token
+		if expiresIn > 0 {
+			p.expiresAt = time.Now().Add(time.Duration(expiresIn) * time.Second)
+		}
 	}
 	return map[string]string{"Authorization": "Bearer " + p.cachedToken}
 }
@@ -385,6 +411,7 @@ type serverCredential struct {
 	ClientID      string    ` + "`" + `json:"client_id"` + "`" + `
 	ClientSecret  string    ` + "`" + `json:"client_secret"` + "`" + `
 	TokenEndpoint string    ` + "`" + `json:"token_endpoint"` + "`" + `
+	Scope         string    ` + "`" + `json:"scope"` + "`" + `
 	HeaderName    string    ` + "`" + `json:"header_name"` + "`" + `
 	Username      string    ` + "`" + `json:"username"` + "`" + `
 	Password      string    ` + "`" + `json:"password"` + "`" + `
@@ -412,11 +439,11 @@ func (s serverCredential) isExpired() bool {
 
 func refreshOAuthToken(credPath, srvURL string, sc serverCredential) (string, error) {
 	if sc.RefreshToken == "" {
-		return "", fmt.Errorf("access token expired and no refresh token available. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", srvURL)
+		return "", fmt.Errorf("access token expired and no refresh token available. Run ` + "`" + `%s auth` + "`" + ` to re-authenticate", os.Args[0])
 	}
 	tokenEndpoint := sc.TokenEndpoint
 	if tokenEndpoint == "" {
-		return "", fmt.Errorf("access token expired and no token endpoint stored. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", srvURL)
+		return "", fmt.Errorf("access token expired and no token endpoint stored. Run ` + "`" + `%s auth` + "`" + ` to re-authenticate", os.Args[0])
 	}
 
 	form := url.Values{
@@ -424,8 +451,18 @@ func refreshOAuthToken(credPath, srvURL string, sc serverCredential) (string, er
 		"client_id":     {sc.ClientID},
 		"refresh_token": {sc.RefreshToken},
 	}
+	if sc.ClientSecret != "" {
+		form.Set("client_secret", sc.ClientSecret)
+	}
 
-	resp, err := http.Post(tokenEndpoint, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("token refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token refresh request failed: %w", err)
 	}
@@ -433,7 +470,7 @@ func refreshOAuthToken(credPath, srvURL string, sc serverCredential) (string, er
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("token refresh failed (%d): %s. Run ` + "`" + `clihub generate --url %s --auth-type oauth2` + "`" + ` to re-authenticate", resp.StatusCode, string(body), srvURL)
+		return "", fmt.Errorf("token refresh failed (%d): %s. Run ` + "`" + `%s auth` + "`" + ` to re-authenticate", resp.StatusCode, string(body), os.Args[0])
 	}
 
 	var tokenResp struct {
@@ -474,7 +511,7 @@ func refreshOAuthToken(credPath, srvURL string, sc serverCredential) (string, er
 
 // --- S2S OAuth2 ---
 
-func s2sAuthenticate(ctx context.Context, tokenEndpoint, clientID, clientSecret string) (string, error) {
+func s2sAuthenticate(ctx context.Context, tokenEndpoint, clientID, clientSecret string) (string, int, error) {
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {clientID},
@@ -483,31 +520,32 @@ func s2sAuthenticate(ctx context.Context, tokenEndpoint, clientID, clientSecret 
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("S2S token request: %w", err)
+		return "", 0, fmt.Errorf("S2S token request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("S2S token endpoint returned %d: %s", resp.StatusCode, string(body))
+		return "", 0, fmt.Errorf("S2S token endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp struct {
 		AccessToken string ` + "`" + `json:"access_token"` + "`" + `
+		ExpiresIn   int    ` + "`" + `json:"expires_in"` + "`" + `
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", fmt.Errorf("parse S2S response: %w", err)
+		return "", 0, fmt.Errorf("parse S2S response: %w", err)
 	}
 	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("S2S response missing access_token")
+		return "", 0, fmt.Errorf("S2S response missing access_token")
 	}
-	return tokenResp.AccessToken, nil
+	return tokenResp.AccessToken, tokenResp.ExpiresIn, nil
 }
 
 // resolveAuthProvider builds an auth provider using the following priority:
@@ -566,12 +604,21 @@ func resolveAuthProvider() authProvider {
 						return &basicAuthProvider{username: s.Username, password: s.Password}
 					case "oauth2":
 						token := s.AccessToken
-						if s.isExpired() && s.RefreshToken != "" {
-							refreshed, err := refreshOAuthToken(credPath, serverURL, s)
-							if err != nil {
-								fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
-							} else {
+						if s.isExpired() {
+							if s.RefreshToken != "" {
+								refreshed, err := refreshOAuthToken(credPath, serverURL, s)
+								if err != nil {
+									fmt.Fprintf(os.Stderr, "Warning: token refresh failed: %s\n", err)
+									deleteCredential(credPath, serverURL)
+									fmt.Fprintf(os.Stderr, "Stored credentials removed. Run ` + "`" + `%s auth` + "`" + ` to re-authenticate.\n", os.Args[0])
+									return &noAuthProvider{}
+								}
 								token = refreshed
+							} else {
+								fmt.Fprintf(os.Stderr, "Warning: access token expired and no refresh token available.\n")
+								deleteCredential(credPath, serverURL)
+								fmt.Fprintf(os.Stderr, "Stored credentials removed. Run ` + "`" + `%s auth` + "`" + ` to re-authenticate.\n", os.Args[0])
+								return &noAuthProvider{}
 							}
 						}
 						return &bearerTokenProvider{token: token}
@@ -592,6 +639,543 @@ func resolveAuthProvider() authProvider {
 	// 5. No auth
 	return &noAuthProvider{}
 }
+
+// --- Credential helpers ---
+
+func defaultCredPath() string {
+	if p := os.Getenv("CLIHUB_CREDENTIALS_FILE"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".clihub", "credentials.json")
+}
+
+func writeCredentials(path string, creds *credentialsFile) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+func deleteCredential(credPath, srvURL string) {
+	if credPath == "" {
+		return
+	}
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		return
+	}
+	var creds credentialsFile
+	if json.Unmarshal(data, &creds) != nil || creds.Servers == nil {
+		return
+	}
+	delete(creds.Servers, srvURL)
+	if updated, err := json.MarshalIndent(creds, "", "  "); err == nil {
+		os.WriteFile(credPath, updated, 0600)
+	}
+}
+
+// --- Auth command ---
+{{- if .IsHTTP}}
+
+func cmdAuth() *cobra.Command {
+	var flagToken string
+	var flagClientID string
+	var flagClientSecret string
+
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Authenticate with the MCP server",
+		Long:  "Run the OAuth browser flow or manually provide credentials for " + serverURL,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagToken != "" {
+				return saveManualToken(flagToken)
+			}
+			return runOAuthFlow(flagClientID, flagClientSecret)
+		},
+	}
+
+	cmd.Flags().StringVar(&flagToken, "token", "", "manually save a bearer token")
+	cmd.Flags().StringVar(&flagClientID, "client-id", "", "pre-registered OAuth client ID")
+	cmd.Flags().StringVar(&flagClientSecret, "client-secret", "", "pre-registered OAuth client secret")
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show current authentication status",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return showAuthStatus()
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "logout",
+		Short: "Remove stored credentials",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			credPath := defaultCredPath()
+			if credPath == "" {
+				return fmt.Errorf("could not determine credentials path")
+			}
+			deleteCredential(credPath, serverURL)
+			fmt.Printf("Credentials removed for %s\n", serverURL)
+			return nil
+		},
+	})
+
+	return cmd
+}
+
+func saveManualToken(token string) error {
+	credPath := defaultCredPath()
+	if credPath == "" {
+		return fmt.Errorf("could not determine credentials path")
+	}
+	data, _ := os.ReadFile(credPath)
+	var creds credentialsFile
+	if json.Unmarshal(data, &creds) != nil || creds.Servers == nil {
+		creds = credentialsFile{Servers: map[string]serverCredential{}}
+	}
+	creds.Servers[serverURL] = serverCredential{
+		AuthType: "bearer_token",
+		Token:    token,
+	}
+	if err := writeCredentials(credPath, &creds); err != nil {
+		return fmt.Errorf("save credentials: %w", err)
+	}
+	fmt.Printf("Token saved for %s\n", serverURL)
+	return nil
+}
+
+func showAuthStatus() error {
+	credPath := defaultCredPath()
+	if credPath == "" {
+		fmt.Println("Not authenticated (no credentials path)")
+		return nil
+	}
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		fmt.Println("Not authenticated")
+		return nil
+	}
+	var creds credentialsFile
+	if json.Unmarshal(data, &creds) != nil || creds.Servers == nil {
+		fmt.Println("Not authenticated")
+		return nil
+	}
+	s, ok := creds.Servers[serverURL]
+	if !ok {
+		fmt.Println("Not authenticated")
+		return nil
+	}
+	authType := s.resolveAuthType()
+	fmt.Printf("Server:    %s\n", serverURL)
+	fmt.Printf("Auth type: %s\n", authType)
+	switch authType {
+	case "oauth2":
+		if s.isExpired() {
+			fmt.Println("Status:    expired")
+		} else {
+			fmt.Println("Status:    authenticated")
+		}
+		if s.ExpiresAt != "" {
+			fmt.Printf("Expires:   %s\n", s.ExpiresAt)
+		}
+	default:
+		fmt.Println("Status:    authenticated")
+	}
+	return nil
+}
+
+func runOAuthFlow(clientID, clientSecret string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	fmt.Println("Discovering OAuth endpoints...")
+
+	// Step 1: Discover protected resource metadata
+	var authServerURL string
+	var scopeFromResource string
+	resMeta, err := fetchResourceMeta(ctx, httpClient, serverURL)
+	if err == nil && len(resMeta.AuthorizationServers) > 0 {
+		authServerURL = resMeta.AuthorizationServers[0]
+		if len(resMeta.ScopesSupported) > 0 {
+			scopeFromResource = strings.Join(resMeta.ScopesSupported, " ")
+		}
+	} else {
+		// Fallback: use server root as auth server
+		u, _ := url.Parse(serverURL)
+		if u != nil {
+			authServerURL = u.Scheme + "://" + u.Host
+		} else {
+			authServerURL = serverURL
+		}
+	}
+
+	// Step 2: Discover auth server metadata
+	authMeta, err := fetchAuthMeta(ctx, httpClient, authServerURL)
+	if err != nil {
+		return fmt.Errorf("OAuth discovery failed: %w\n\nIf this server doesn't support OAuth, provide a token manually:\n  %s auth --token <YOUR_TOKEN>", err, os.Args[0])
+	}
+	fmt.Printf("Found authorization server: %s\n", authMeta.Issuer)
+
+	// Determine scope
+	scope := "mcp:tools"
+	if scopeFromResource != "" {
+		scope = scopeFromResource
+	} else if len(authMeta.ScopesSupported) > 0 {
+		scope = strings.Join(authMeta.ScopesSupported, " ")
+	}
+
+	// Step 3: Start callback server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("could not start callback server: %w", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	resultCh := make(chan oauthCallbackResult, 1)
+	var cbOnce sync.Once
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		oauthErr := r.URL.Query().Get("error")
+		state := r.URL.Query().Get("state")
+		var res oauthCallbackResult
+		if oauthErr != "" {
+			desc := r.URL.Query().Get("error_description")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "<html><body><h1>Authorization failed</h1><p>%s: %s</p></body></html>", oauthErr, desc)
+			res = oauthCallbackResult{err: fmt.Errorf("%s: %s", oauthErr, desc)}
+		} else if code == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "<html><body><h1>Missing authorization code</h1></body></html>")
+			res = oauthCallbackResult{err: fmt.Errorf("missing authorization code")}
+		} else {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>")
+			res = oauthCallbackResult{code: code, state: state}
+		}
+		cbOnce.Do(func() {
+			resultCh <- res
+		})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(listener)
+	defer srv.Close()
+
+	// Step 4: Client credentials (DCR or pre-registered)
+	if clientID == "" && authMeta.RegistrationEndpoint != "" {
+		fmt.Println("Registering OAuth client...")
+		regID, regSecret, err := registerOAuthClient(ctx, httpClient, authMeta.RegistrationEndpoint, redirectURI, scope)
+		if err != nil {
+			return fmt.Errorf("client registration failed: %w\n\n"+
+				"This server requires a pre-registered OAuth app.\n"+
+				"  1. Register at the provider's portal (%s)\n"+
+				"  2. Set redirect URI to: http://127.0.0.1/callback\n"+
+				"  3. Run: %s auth --client-id <ID> --client-secret <SECRET>",
+				err, authMeta.Issuer, os.Args[0])
+		}
+		clientID = regID
+		clientSecret = regSecret
+	} else if clientID == "" {
+		return fmt.Errorf("this server requires a pre-registered OAuth app\n\n"+
+			"  1. Register at the provider's portal (%s)\n"+
+			"  2. Set redirect URI to: http://127.0.0.1/callback\n"+
+			"  3. Run: %s auth --client-id <ID> --client-secret <SECRET>",
+			authMeta.Issuer, os.Args[0])
+	}
+
+	// Step 5: PKCE
+	verifier, err := generatePKCEVerifier()
+	if err != nil {
+		return fmt.Errorf("PKCE generation failed: %w", err)
+	}
+	challenge := generatePKCEChallenge(verifier)
+
+	// Step 6: State
+	state, err := generateOAuthState()
+	if err != nil {
+		return fmt.Errorf("state generation failed: %w", err)
+	}
+
+	// Step 7: Build authorization URL
+	authURL, err := url.Parse(authMeta.AuthorizationEndpoint)
+	if err != nil {
+		return fmt.Errorf("invalid authorization endpoint: %w", err)
+	}
+	q := authURL.Query()
+	q.Set("client_id", clientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("response_type", "code")
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", state)
+	q.Set("scope", scope)
+	authURL.RawQuery = q.Encode()
+
+	// Step 8: Open browser
+	fmt.Println("Opening browser for authentication...")
+	openDefaultBrowser(authURL.String())
+	fmt.Printf("If the browser doesn't open, visit:\n%s\n\nWaiting for authorization...\n", authURL.String())
+
+	// Step 9: Wait for callback
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("timed out waiting for authorization")
+	case result := <-resultCh:
+		if result.err != nil {
+			return fmt.Errorf("authorization failed: %w", result.err)
+		}
+		if result.state != state {
+			return fmt.Errorf("OAuth state mismatch (possible CSRF)")
+		}
+
+		// Step 10: Exchange code for tokens
+		fmt.Println("Exchanging authorization code for tokens...")
+		form := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {result.code},
+			"redirect_uri":  {redirectURI},
+			"client_id":     {clientID},
+			"code_verifier": {verifier},
+		}
+		if clientSecret != "" {
+			form.Set("client_secret", clientSecret)
+		}
+
+		tokenReq, err := http.NewRequestWithContext(ctx, "POST", authMeta.TokenEndpoint, strings.NewReader(form.Encode()))
+		if err != nil {
+			return fmt.Errorf("token exchange: %w", err)
+		}
+		tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		tokenResp, err := httpClient.Do(tokenReq)
+		if err != nil {
+			return fmt.Errorf("token exchange request: %w", err)
+		}
+		defer tokenResp.Body.Close()
+
+		if tokenResp.StatusCode != http.StatusOK && tokenResp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(tokenResp.Body)
+			return fmt.Errorf("token exchange failed (%d): %s", tokenResp.StatusCode, string(body))
+		}
+
+		var tokens struct {
+			AccessToken  string ` + "`" + `json:"access_token"` + "`" + `
+			RefreshToken string ` + "`" + `json:"refresh_token"` + "`" + `
+			ExpiresIn    int    ` + "`" + `json:"expires_in"` + "`" + `
+			Scope        string ` + "`" + `json:"scope"` + "`" + `
+		}
+		if err := json.NewDecoder(tokenResp.Body).Decode(&tokens); err != nil {
+			return fmt.Errorf("parse token response: %w", err)
+		}
+		if tokens.AccessToken == "" {
+			return fmt.Errorf("token response missing access_token")
+		}
+
+		// Save to credential store
+		credPath := defaultCredPath()
+		if credPath == "" {
+			return fmt.Errorf("could not determine credentials path")
+		}
+		data, _ := os.ReadFile(credPath)
+		var creds credentialsFile
+		if json.Unmarshal(data, &creds) != nil || creds.Servers == nil {
+			creds = credentialsFile{Servers: map[string]serverCredential{}}
+		}
+		entry := serverCredential{
+			AuthType:      "oauth2",
+			AccessToken:   tokens.AccessToken,
+			RefreshToken:  tokens.RefreshToken,
+			ClientID:      clientID,
+			ClientSecret:  clientSecret,
+			TokenEndpoint: authMeta.TokenEndpoint,
+			Scope:         tokens.Scope,
+		}
+		if tokens.ExpiresIn > 0 {
+			entry.ExpiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Format(time.RFC3339)
+		}
+		creds.Servers[serverURL] = entry
+		if err := writeCredentials(credPath, &creds); err != nil {
+			return fmt.Errorf("save credentials: %w", err)
+		}
+
+		fmt.Println("Authentication successful! Credentials saved.")
+		return nil
+	}
+}
+
+type oauthCallbackResult struct {
+	code, state string
+	err         error
+}
+
+type oauthServerMeta struct {
+	Issuer                string   ` + "`" + `json:"issuer"` + "`" + `
+	AuthorizationEndpoint string   ` + "`" + `json:"authorization_endpoint"` + "`" + `
+	TokenEndpoint         string   ` + "`" + `json:"token_endpoint"` + "`" + `
+	RegistrationEndpoint  string   ` + "`" + `json:"registration_endpoint"` + "`" + `
+	ScopesSupported       []string ` + "`" + `json:"scopes_supported"` + "`" + `
+}
+
+type oauthResourceMeta struct {
+	AuthorizationServers []string ` + "`" + `json:"authorization_servers"` + "`" + `
+	ScopesSupported      []string ` + "`" + `json:"scopes_supported"` + "`" + `
+}
+
+func fetchResourceMeta(ctx context.Context, client *http.Client, srvURL string) (*oauthResourceMeta, error) {
+	for _, wk := range oauthWellKnownURLs(srvURL, "oauth-protected-resource") {
+		req, err := http.NewRequestWithContext(ctx, "GET", wk, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+		var meta oauthResourceMeta
+		err = json.NewDecoder(resp.Body).Decode(&meta)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if len(meta.AuthorizationServers) > 0 {
+			return &meta, nil
+		}
+	}
+	return nil, fmt.Errorf("no resource metadata found")
+}
+
+func fetchAuthMeta(ctx context.Context, client *http.Client, authSrvURL string) (*oauthServerMeta, error) {
+	for _, wk := range oauthWellKnownURLs(authSrvURL, "oauth-authorization-server") {
+		req, err := http.NewRequestWithContext(ctx, "GET", wk, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+		var meta oauthServerMeta
+		err = json.NewDecoder(resp.Body).Decode(&meta)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		if meta.AuthorizationEndpoint != "" && meta.TokenEndpoint != "" {
+			return &meta, nil
+		}
+	}
+	return nil, fmt.Errorf("no auth server metadata found at %s", authSrvURL)
+}
+
+func oauthWellKnownURLs(rawURL, suffix string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	path := strings.TrimRight(u.Path, "/")
+	base := fmt.Sprintf("%s://%s/.well-known/%s", u.Scheme, u.Host, suffix)
+	if path == "" {
+		return []string{base}
+	}
+	return []string{base + path, base}
+}
+
+func registerOAuthClient(ctx context.Context, client *http.Client, endpoint, redirectURI, scope string) (string, string, error) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"client_name":                {{quote .CLIName}},
+		"redirect_uris":             []string{redirectURI},
+		"grant_types":               []string{"authorization_code", "refresh_token"},
+		"response_types":            []string{"code"},
+		"token_endpoint_auth_method": "none",
+		"scope":                      scope,
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("registration failed (%d): %s", resp.StatusCode, string(b))
+	}
+	var reg struct {
+		ClientID     string ` + "`" + `json:"client_id"` + "`" + `
+		ClientSecret string ` + "`" + `json:"client_secret"` + "`" + `
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reg); err != nil {
+		return "", "", err
+	}
+	if reg.ClientID == "" {
+		return "", "", fmt.Errorf("server returned empty client_id")
+	}
+	return reg.ClientID, reg.ClientSecret, nil
+}
+
+func generatePKCEVerifier() (string, error) {
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+	b := make([]byte, 64)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(b), nil
+}
+
+func generatePKCEChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+func generateOAuthState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func openDefaultBrowser(url string) {
+	switch runtime.GOOS {
+	case "darwin":
+		exec.Command("open", url).Start()
+	case "linux":
+		exec.Command("xdg-open", url).Start()
+	case "windows":
+		exec.Command("cmd", "/c", "start", "", url).Start()
+	}
+}
+{{- end}}
 `
 
 const goModTemplateSource = `module {{.CLIName}}

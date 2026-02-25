@@ -78,22 +78,26 @@ func (s *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 	state := r.URL.Query().Get("state")
 	oauthErr := r.URL.Query().Get("error")
 
+	var res CallbackResult
 	if oauthErr != "" {
 		desc := r.URL.Query().Get("error_description")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "<html><body><h1>Authorization failed</h1><p>%s: %s</p></body></html>", oauthErr, desc)
-		s.result <- CallbackResult{Err: fmt.Errorf("OAuth error: %s — %s", oauthErr, desc)}
-		return
-	}
-
-	if code == "" {
+		res = CallbackResult{Err: fmt.Errorf("OAuth error: %s — %s", oauthErr, desc)}
+	} else if code == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, "<html><body><h1>Missing authorization code</h1></body></html>")
-		s.result <- CallbackResult{Err: fmt.Errorf("callback missing authorization code")}
-		return
+		res = CallbackResult{Err: fmt.Errorf("callback missing authorization code")}
+	} else {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this window and return to the terminal.</p></body></html>")
+		res = CallbackResult{Code: code, State: state}
 	}
 
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "<html><body><h1>Authentication successful!</h1><p>You can close this window and return to the terminal.</p></body></html>")
-	s.result <- CallbackResult{Code: code, State: state}
+	// Non-blocking send: if a duplicate request arrives after the first
+	// result was already sent, drop it instead of blocking the goroutine.
+	select {
+	case s.result <- res:
+	default:
+	}
 }
