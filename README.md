@@ -4,7 +4,7 @@
   <img src="assets/cli_vs_mcp.png" alt="MCP vs CLI" width="600">
 </p>
 
-Turn any [MCP server](https://modelcontextprotocol.io/) into a compiled CLI binary. One command.
+Turn any [MCP server](https://modelcontextprotocol.io/) into a compiled CLI binary. One command. Designed for agents.
 
 ```
 clihub generate --url https://mcp.linear.app/mcp
@@ -141,20 +141,6 @@ Other:
   --verbose                 Show detailed progress
   --quiet                   Suppress all output except errors
 ```
-
-## Tested With
-
-These MCP servers have been tested end-to-end with clihub:
-
-| Server | Transport | Auth | Tools |
-|--------|-----------|------|-------|
-| [Linear](https://mcp.linear.app/mcp) | HTTP | OAuth | 37 |
-| [Notion](https://mcp.notion.com/mcp) | HTTP | OAuth | 12 |
-| [Stripe](https://mcp.stripe.com) | HTTP | OAuth | 15 |
-| [Vercel](https://mcp.vercel.com) | HTTP | OAuth | 12 |
-| [Supabase](https://mcp.supabase.com/mcp) | HTTP | OAuth | 29 |
-| [Miro](https://mcp.miro.com/) | HTTP | OAuth | 13 |
-| [Webflow](https://mcp.webflow.com/mcp) | HTTP | OAuth | 19 |
 
 ## Project Structure
 
