@@ -13,6 +13,8 @@ clihub generate --url https://mcp.linear.app/mcp
 
 Every tool the server exposes becomes a subcommand with flags derived from its JSON Schema. Auth is handled automatically — OAuth, bearer tokens, API keys, and more.
 
+[Full blog post](https://kanyilmaz.me/2026/02/23/cli-vs-mcp.html)
+
 ## Install
 
 ```bash
