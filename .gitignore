@@ -1,0 +1,42 @@
+# Build output
+/out/
+/clihub
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.prof
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VBW planning (dev tooling, not part of the project)
+.vbw-planning/
+
+# Claude Code
+.claude/
+
+# Test MCP servers (local dev only)
+test-mcps/
+
+# Credentials (never commit)
+credentials.json
+*.pem
+*.key
+.env
+.env.*
