@@ -11,10 +11,16 @@ These can cause data loss, credential leaks, or security vulnerabilities. Fix be
 - [ ] **Atomic credential file writes** — `SaveCredentials` truncates then writes. If process crashes mid-write, credentials are lost. Write to temp file + rename.
 - [ ] **File-level locking on credentials** — Two generated CLIs refreshing tokens simultaneously corrupt `credentials.json`. Use `flock` or equivalent.
 - [ ] **Set 0600 permissions on credential file** — Verify permissions on creation and on every load. Warn if world-readable.
+- [ ] **Introduce `SecretStore` abstraction** — Add a runtime interface (`Get`, `Set`, `Delete`, `ListByServer`) so auth providers never read/write secrets directly.
+- [ ] **Use OS keychain backends by default** — Implement `SecretStore` backends for macOS Keychain, Windows Credential Manager/DPAPI, and Linux Secret Service/KWallet.
+- [ ] **Handle missing keychains explicitly** — Detect headless/container/CI environments where keychain is unavailable; fail with actionable guidance or require explicit fallback mode.
+- [ ] **Split metadata from secret material** — Keep `credentials.json` for non-secret metadata (`auth_type`, `expires_at`, `scope`, `token_endpoint`, secret references). Store secrets (tokens, passwords, client secrets, API keys) in `SecretStore`.
+- [ ] **Credential schema migration for secret refs** — Add v2→v3 migration that moves secrets out of `credentials.json` into `SecretStore`, with rollback-safe behavior.
 - [ ] **HTML-escape OAuth callback error output** — `error_description` from server is rendered raw in callback HTML. XSS if server sends malicious content.
 - [ ] **Warn on non-HTTPS server URLs** — HTTP MCP servers expose tokens in transit. Print a warning, don't silently accept.
-- [ ] **Strip tokens from verbose/error output** — Audit all `fmt.Fprintf(os.Stderr, ...)` paths to ensure access tokens never leak to logs.
+- [ ] **Strip secrets from verbose/error output** — Audit all stderr/log paths (including OAuth/S2S token endpoint error bodies) so tokens, client secrets, API keys, and passwords never leak.
 - [ ] **Validate stdio command safety** — Sanitize `--stdio` input to prevent shell injection via `$(...)` or backticks.
+- [ ] **Keep generated CLIs security-parity with runtime** — Apply the same locking, atomic writes, permission checks, redaction, and callback escaping in `internal/codegen/main_tmpl.go`.
 
 ---
 
@@ -68,7 +74,7 @@ These make clihub significantly more pleasant to use. High value, moderate effor
 - [ ] **Parallel cross-compilation** — Compile multiple platforms concurrently instead of sequentially.
 - [ ] **Strip debug symbols** — Add `-ldflags="-s -w"` to `go build` for ~30% smaller binaries.
 - [ ] **Build caching** — Skip recompilation if tool schema hasn't changed since last generate.
-- [ ] **Prune expired credentials** — Clean up tokens that expired >30 days ago from `credentials.json`.
+- [ ] **Prune expired credentials + orphaned secrets** — Clean up stale metadata in `credentials.json` and remove matching stale entries from `SecretStore`.
 - [ ] **`clihub list`** — Show all previously generated CLIs and their server URLs (scan `~/.clihub/` or output dirs).
 - [ ] **Colored output** — Use ANSI colors for errors (red), warnings (yellow), success (green). Respect `NO_COLOR`.
 
