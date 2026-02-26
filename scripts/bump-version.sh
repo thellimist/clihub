@@ -16,7 +16,7 @@ read_version() {
   if [[ -f "$VERSION_FILE" ]]; then
     tr -d '[:space:]' < "$VERSION_FILE"
   else
-    echo "0.1.0"
+    echo "0.0.0"
   fi
 }
 
@@ -66,3 +66,4 @@ esac
 next="${major}.${minor}.${patch}"
 printf '%s\n' "$next" > "$VERSION_FILE"
 echo "VERSION bumped: $current -> $next"
+echo "Next tag: v$next"

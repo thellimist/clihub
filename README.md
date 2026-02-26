@@ -195,12 +195,21 @@ The repo-managed pre-push hook runs:
 - `go test ./...`
 - `golangci-lint run` (if installed)
 
-Pushes to `main` also require a `VERSION` bump in the pushed commits.
+Pushes to `main` also require both:
+
+- `VERSION` updated in the pushed commits
+- annotated git tag `vX.Y.Z` that matches `VERSION` and points at pushed `main` HEAD
+
+`scripts/install-hooks.sh` also sets `push.followTags=true`, so matching annotated tags are pushed automatically.
+
+Example release bump flow:
 
 ```bash
-bash scripts/bump-version.sh
+bash scripts/bump-version.sh patch   # updates VERSION (e.g. 0.0.1 -> 0.0.2)
 git add VERSION
-git commit --amend --no-edit
+git commit -m "chore: bump version to $(cat VERSION)"
+git tag -a "v$(cat VERSION)" -m "v$(cat VERSION)"
+git push origin main                 # followTags=true pushes the tag too
 ```
 
 ### Running Tests

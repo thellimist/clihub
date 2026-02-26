@@ -63,6 +63,53 @@ for ref in "${refs[@]}"; do
     echo ""
     exit 1
   fi
+
+  version_in_commit=$(git show "$local_sha:VERSION" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ -z "$version_in_commit" || ! "$version_in_commit" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo ""
+    echo "ERROR: push to main blocked — VERSION in pushed commit is missing or invalid."
+    echo "Expected: MAJOR.MINOR.PATCH (for example 0.0.1)"
+    echo ""
+    exit 1
+  fi
+
+  expected_tag="v$version_in_commit"
+  tag_obj_type=$(git for-each-ref "refs/tags/$expected_tag" --format='%(objecttype)' | head -1 || true)
+  tag_target_sha=$(git rev-list -n 1 "$expected_tag" 2>/dev/null || true)
+
+  if [[ -z "$tag_obj_type" ]]; then
+    echo ""
+    echo "ERROR: push to main blocked — missing release tag $expected_tag."
+    echo ""
+    echo "Run:"
+    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo "  git push --follow-tags origin main"
+    echo ""
+    exit 1
+  fi
+
+  if [[ "$tag_obj_type" != "tag" ]]; then
+    echo ""
+    echo "ERROR: push to main blocked — $expected_tag must be an annotated tag."
+    echo "Recreate as annotated:"
+    echo "  git tag -d $expected_tag"
+    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo ""
+    exit 1
+  fi
+
+  if [[ "$tag_target_sha" != "$local_sha" ]]; then
+    echo ""
+    echo "ERROR: push to main blocked — tag $expected_tag does not point at pushed main commit."
+    echo "Tag points to: $tag_target_sha"
+    echo "Pushed commit:  $local_sha"
+    echo ""
+    echo "Run:"
+    echo "  git tag -d $expected_tag"
+    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo ""
+    exit 1
+  fi
 done
 
 exit 0
