@@ -180,10 +180,28 @@ main.go           Entry point
 
 1. Fork the repo
 2. Create a feature branch (`git checkout -b feature/my-change`)
-3. Make your changes
-4. Run tests: `go test ./...`
-5. Commit with conventional format: `feat(scope): description`
-6. Open a PR
+3. Install repo hooks: `bash scripts/install-hooks.sh`
+4. Make your changes
+5. Run tests: `go test ./...`
+6. Commit with conventional format: `feat(scope): description`
+7. Open a PR
+
+### Hooks
+
+The repo-managed pre-push hook runs:
+
+- `gofmt` formatting check (fails on unformatted `.go` files)
+- `go vet ./...`
+- `go test ./...`
+- `golangci-lint run` (if installed)
+
+Pushes to `main` also require a `VERSION` bump in the pushed commits.
+
+```bash
+bash scripts/bump-version.sh
+git add VERSION
+git commit --amend --no-edit
+```
 
 ### Running Tests
 

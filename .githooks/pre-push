@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -z "$ROOT" ]]; then
+  exit 0
+fi
+
+zero_sha="0000000000000000000000000000000000000000"
+refs=()
+all_changed_files=""
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  refs+=("$local_ref $local_sha $remote_ref $remote_sha")
+done
+
+for ref in "${refs[@]}"; do
+  read -r local_ref local_sha remote_ref remote_sha <<< "$ref"
+  [[ "$local_sha" == "$zero_sha" ]] && continue
+  [[ "$local_ref" != refs/heads/* ]] && continue
+
+  if [[ "$remote_sha" == "$zero_sha" ]]; then
+    range="$local_sha"
+  else
+    range="${remote_sha}..${local_sha}"
+  fi
+
+  changed_files=$(git diff --name-only "$range" 2>/dev/null || true)
+  [[ -z "$changed_files" ]] && continue
+  all_changed_files+=$'\n'"$changed_files"
+done
+
+changed_go_files=$(printf "%s\n" "$all_changed_files" | awk '/\.go$/ { print }' | sort -u)
+CHECK_ALL_GO_FILES=0 CHANGED_GO_FILES="$changed_go_files" bash "$ROOT/scripts/pre-push-checks.sh"
+
+for ref in "${refs[@]}"; do
+  read -r local_ref local_sha remote_ref remote_sha <<< "$ref"
+  [[ "$local_sha" == "$zero_sha" ]] && continue
+  [[ "$local_ref" != refs/heads/* ]] && continue
+
+  # Version bumps are only required for pushes to main.
+  [[ "$remote_ref" != "refs/heads/main" ]] && continue
+
+  if [[ "$remote_sha" == "$zero_sha" ]]; then
+    range="$local_sha"
+  else
+    range="${remote_sha}..${local_sha}"
+  fi
+
+  changed_files=$(git diff --name-only "$range" 2>/dev/null || true)
+  [[ -z "$changed_files" ]] && continue
+
+  if ! echo "$changed_files" | grep -qx "VERSION"; then
+    echo ""
+    echo "ERROR: push to main blocked — VERSION not updated."
+    echo ""
+    echo "Run:"
+    echo "  bash scripts/bump-version.sh"
+    echo "  git add VERSION"
+    echo "  git commit --amend --no-edit"
+    echo ""
+    echo "Bypass (rare): git push --no-verify"
+    echo ""
+    exit 1
+  fi
+done
+
+exit 0
