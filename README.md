@@ -31,6 +31,12 @@ your git/go setup is trying to fetch directly from GitHub without credentials. U
 
 Note: the canonical module path is `github.com/thellimist/clihub` (not `github.com/clihub/clihub`).
 
+`go install` places the binary in `$GOBIN` (or `$GOPATH/bin`, typically `~/go/bin`). If the `clihub` command is not found after install, make sure that directory is in your `PATH`:
+
+```bash
+export PATH="$HOME/go/bin:$PATH"
+```
+
 Or build from source:
 
 ```bash
