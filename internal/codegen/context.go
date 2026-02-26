@@ -1,6 +1,6 @@
 package codegen
 
-import "github.com/clihub/clihub/internal/schema"
+import "github.com/thellimist/clihub/internal/schema"
 
 // GenerateContext holds all data needed to generate a CLI project.
 type GenerateContext struct {

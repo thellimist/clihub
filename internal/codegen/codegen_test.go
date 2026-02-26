@@ -4,9 +4,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/clihub/clihub/internal/schema"
+	"github.com/thellimist/clihub/internal/schema"
 )
 
 func TestGenerateProducesValidGo(t *testing.T) {
@@ -85,6 +86,15 @@ func TestGenerateProducesValidGo(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected file %s to exist: %v", f, err)
 		}
+	}
+
+	// Keep generated go.mod Go version aligned with dependency minimum.
+	modBytes, err := os.ReadFile(filepath.Join(projectDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("read generated go.mod: %v", err)
+	}
+	if !strings.Contains(string(modBytes), "\ngo 1.24") {
+		t.Fatalf("generated go.mod must declare go 1.24.x, got:\n%s", string(modBytes))
 	}
 
 	// Verify generated Go code passes go vet

@@ -10,17 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clihub/clihub/internal/auth"
-	"github.com/clihub/clihub/internal/codegen"
-	"github.com/clihub/clihub/internal/compile"
-	"github.com/clihub/clihub/internal/gocheck"
-	"github.com/clihub/clihub/internal/nameutil"
-	"github.com/clihub/clihub/internal/schema"
-	"github.com/clihub/clihub/internal/toolfilter"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/cobra"
+	"github.com/thellimist/clihub/internal/auth"
+	"github.com/thellimist/clihub/internal/codegen"
+	"github.com/thellimist/clihub/internal/compile"
+	"github.com/thellimist/clihub/internal/gocheck"
+	"github.com/thellimist/clihub/internal/nameutil"
+	"github.com/thellimist/clihub/internal/schema"
+	"github.com/thellimist/clihub/internal/toolfilter"
 )
 
 var (

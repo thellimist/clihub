@@ -1,4 +1,4 @@
-module github.com/clihub/clihub
+module github.com/thellimist/clihub
 
 go 1.25.6
 

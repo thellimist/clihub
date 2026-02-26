@@ -18,18 +18,35 @@ Every tool the server exposes becomes a subcommand with flags derived from its J
 ## Install
 
 ```bash
-go install github.com/clihub/clihub@latest
+go install github.com/thellimist/clihub@latest
 ```
+
+If `go install` fails with
+`fatal: could not read Username for 'https://github.com': terminal prompts disabled`,
+your git/go setup is trying to fetch directly from GitHub without credentials. Use one of:
+
+- Configure GitHub auth for git (HTTPS token or SSH key).
+- Force the public Go proxy: `GOPROXY=https://proxy.golang.org,direct go install github.com/thellimist/clihub@latest`
+- Build from source (below).
+
+Note: the canonical module path is `github.com/thellimist/clihub` (not `github.com/clihub/clihub`).
 
 Or build from source:
 
 ```bash
-git clone https://github.com/clihub/clihub.git
+git clone https://github.com/thellimist/clihub.git
 cd clihub
 go build -o clihub .
+install -m 755 clihub ~/.local/bin/clihub
 ```
 
-Requires Go 1.21+.
+If `~/.local/bin` is not in your `PATH`, add it in your shell config (for example `~/.zshrc`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Requires Go 1.24+.
 
 ## Quick Start
 

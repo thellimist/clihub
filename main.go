@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/clihub/clihub/cmd"
+	"github.com/thellimist/clihub/cmd"
 )
 
 var version = "dev"
