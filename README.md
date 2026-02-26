@@ -40,6 +40,8 @@ go build -o clihub .
 install -m 755 clihub ~/.local/bin/clihub
 ```
 
+If you're contributing, run `bash scripts/install-hooks.sh` once after cloning.
+
 If `~/.local/bin` is not in your `PATH`, add it in your shell config (for example `~/.zshrc`):
 
 ```bash
@@ -187,6 +189,13 @@ main.go           Entry point
 7. Open a PR
 
 ### Hooks
+
+Hook files are tracked in this repo (`.githooks/`), so `git clone` downloads them automatically.
+Run this once per clone to activate them:
+
+```bash
+bash scripts/install-hooks.sh
+```
 
 The repo-managed pre-push hook runs:
 
