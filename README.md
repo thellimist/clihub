@@ -73,6 +73,20 @@ clihub generate --url https://mcp.stripe.com \
   --platform linux/amd64,darwin/arm64,windows/amd64
 ```
 
+### Pass tool input as JSON
+
+Generated CLIs include a `--from-json` flag on each tool command. This lets you pass the full tool input object directly.
+
+```bash
+./out/linear create-issue --from-json '{"title":"Bug report","priority":"high"}'
+```
+
+Rules:
+
+- `--from-json` bypasses typed tool flags.
+- `--from-json` cannot be combined with typed flags in the same call.
+- If a tool already has a `--from-json` flag from its schema, clihub uses `--clihub-from-json` for passthrough instead.
+
 ## How It Works
 
 1. **Connect** to the MCP server (HTTP or stdio)

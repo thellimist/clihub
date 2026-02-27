@@ -132,13 +132,23 @@ func printAuthFlagHelp(out io.Writer) {
 	fmt.Fprintln(out, "  --auth-password string      password for basic auth")
 }
 
+func chooseFromJSONFlagName(cmd *cobra.Command) string {
+	for _, candidate := range []string{"from-json", "clihub-from-json", "from-json-input"} {
+		if cmd.Flags().Lookup(candidate) == nil {
+			return candidate
+		}
+	}
+	return "clihub-from-json"
+}
+
 // --- Tool commands ---
 {{range .Tools}}
 func cmd{{funcName .Name}}() *cobra.Command {
 {{- range .Options}}
 	var {{varName .FlagName}} {{.GoType}}
 {{- end}}
-	var flagRaw string
+	var flagFromJSON string
+	fromJSONFlagName := "from-json"
 
 	cmd := &cobra.Command{
 		Use:     {{quote .CommandName}},
@@ -148,14 +158,23 @@ func cmd{{funcName .Name}}() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			params := make(map[string]interface{})
-			if flagRaw != "" {
-				if err := json.Unmarshal([]byte(flagRaw), &params); err != nil {
-					return fmt.Errorf("invalid --raw JSON: %w", err)
+			if flagFromJSON != "" {
+				var conflictingFlag string
+{{- range .Options}}
+				if conflictingFlag == "" && cmd.Flags().Changed({{quote .FlagName}}) {
+					conflictingFlag = {{quote .FlagName}}
+				}
+{{- end}}
+				if conflictingFlag != "" {
+					return fmt.Errorf("--%s cannot be combined with --%s", fromJSONFlagName, conflictingFlag)
+				}
+				if err := json.Unmarshal([]byte(flagFromJSON), &params); err != nil {
+					return fmt.Errorf("invalid --%s JSON: %w", fromJSONFlagName, err)
 				}
 			} else {
 {{- range .Options}}
 {{- if eq .GoType "string"}}
-				if {{varName .FlagName}} != "" {
+					if {{varName .FlagName}} != "" {
 					params[{{quote .PropertyName}}] = {{varName .FlagName}}
 				}
 {{- else if eq .GoType "int"}}
@@ -206,7 +225,8 @@ func cmd{{funcName .Name}}() *cobra.Command {
 {{- range .Options}}
 	cmd.Flags().{{cobraFlag .GoType}}(&{{varName .FlagName}}, {{quote .FlagName}}, {{defaultLit .GoType .DefaultValue}}, {{quote (hasEnumDesc .Description .EnumValues)}})
 {{- end}}
-	cmd.Flags().StringVar(&flagRaw, "raw", "", "raw JSON arguments (bypasses all other flags)")
+	fromJSONFlagName = chooseFromJSONFlagName(cmd)
+	cmd.Flags().StringVar(&flagFromJSON, fromJSONFlagName, "", "tool input as JSON (bypasses typed flags)")
 
 	return cmd
 }

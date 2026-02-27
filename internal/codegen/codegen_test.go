@@ -155,6 +155,49 @@ func TestGenerateStdioMode(t *testing.T) {
 	}
 }
 
+func TestGenerateWithRawBooleanOptionCompiles(t *testing.T) {
+	ctx := GenerateContext{
+		CLIName:       "rawtest",
+		ServerURL:     "https://example.com/mcp",
+		ClihubVersion: "test",
+		IsHTTP:        true,
+		Tools: []ToolDef{
+			{
+				Name:        "vault",
+				CommandName: "vault",
+				Description: "Tool with raw boolean parameter",
+				Options: []schema.ToolOption{
+					{
+						PropertyName: "raw",
+						FlagName:     "raw",
+						Description:  "Return raw result",
+						GoType:       "bool",
+					},
+					{
+						PropertyName: "query",
+						FlagName:     "query",
+						Description:  "Query text",
+						GoType:       "string",
+					},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	projectDir, err := Generate(ctx, dir)
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	buildCmd := exec.Command("go", "build", "-o", filepath.Join(t.TempDir(), "rawtest"), ".")
+	buildCmd.Dir = projectDir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		mainGo, _ := os.ReadFile(filepath.Join(projectDir, "main.go"))
+		t.Fatalf("go build failed: %v\nOutput: %s\nGenerated main.go:\n%s", err, string(out), string(mainGo))
+	}
+}
+
 func TestTemplateFunctions(t *testing.T) {
 	tests := []struct {
 		name     string
