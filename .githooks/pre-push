@@ -55,9 +55,10 @@ for ref in "${refs[@]}"; do
     echo "ERROR: push to main blocked — VERSION not updated."
     echo ""
     echo "Run:"
-    echo "  bash scripts/bump-version.sh"
-    echo "  git add VERSION"
-    echo "  git commit --amend --no-edit"
+    echo "  bash scripts/bump-version.sh --prepare-push patch"
+    echo ""
+    echo "Then push again:"
+    echo "  git push --follow-tags origin main"
     echo ""
     echo "Bypass (rare): git push --no-verify"
     echo ""
@@ -82,7 +83,7 @@ for ref in "${refs[@]}"; do
     echo "ERROR: push to main blocked — missing release tag $expected_tag."
     echo ""
     echo "Run:"
-    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo "  bash scripts/bump-version.sh --sync-tag"
     echo "  git push --follow-tags origin main"
     echo ""
     exit 1
@@ -91,9 +92,8 @@ for ref in "${refs[@]}"; do
   if [[ "$tag_obj_type" != "tag" ]]; then
     echo ""
     echo "ERROR: push to main blocked — $expected_tag must be an annotated tag."
-    echo "Recreate as annotated:"
-    echo "  git tag -d $expected_tag"
-    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo "Fix with:"
+    echo "  bash scripts/bump-version.sh --sync-tag"
     echo ""
     exit 1
   fi
@@ -105,8 +105,7 @@ for ref in "${refs[@]}"; do
     echo "Pushed commit:  $local_sha"
     echo ""
     echo "Run:"
-    echo "  git tag -d $expected_tag"
-    echo "  git tag -a $expected_tag $local_sha -m \"$expected_tag\""
+    echo "  bash scripts/bump-version.sh --sync-tag"
     echo ""
     exit 1
   fi

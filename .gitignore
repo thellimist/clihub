@@ -25,9 +25,6 @@
 .DS_Store
 Thumbs.db
 
-# VBW planning (dev tooling, not part of the project)
-.vbw-planning/
-
 # Claude Code
 .claude/
 

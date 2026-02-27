@@ -212,11 +212,15 @@ Pushes to `main` also require both:
 Example release bump flow:
 
 ```bash
-bash scripts/bump-version.sh patch   # updates VERSION (e.g. 0.0.1 -> 0.0.2)
-git add VERSION
-git commit -m "chore: bump version to $(cat VERSION)"
-git tag -a "v$(cat VERSION)" -m "v$(cat VERSION)"
-git push origin main                 # followTags=true pushes the tag too
+bash scripts/bump-version.sh --prepare-push patch   # bumps VERSION, amends HEAD, creates vX.Y.Z tag
+git push --follow-tags origin main
+```
+
+Tag-only repair flow (if VERSION is already correct but tag is missing/misaligned):
+
+```bash
+bash scripts/bump-version.sh --sync-tag
+git push --follow-tags origin main
 ```
 
 ### Running Tests
