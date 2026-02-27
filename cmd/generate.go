@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -41,6 +42,7 @@ var (
 	flagOAuth           bool
 	flagClientID        string
 	flagClientSecret    string
+	flagHelpAuth        bool
 	flagVerbose         bool
 	flagQuiet           bool
 )
@@ -98,11 +100,19 @@ func init() {
 	f.BoolVar(&flagOAuth, "oauth", false, "use OAuth for authentication (interactive browser flow)")
 	f.StringVar(&flagClientID, "client-id", "", "pre-registered OAuth client ID (use with --oauth)")
 	f.StringVar(&flagClientSecret, "client-secret", "", "pre-registered OAuth client secret (use with --oauth)")
+	f.BoolVar(&flagHelpAuth, "help-auth", false, "show authentication flags and exit")
 	f.BoolVar(&flagVerbose, "verbose", false, "show detailed progress during generation")
 	f.BoolVar(&flagQuiet, "quiet", false, "suppress all output except errors")
+
+	hideGenerateAuthFlags()
 }
 
 func runGenerate(cmd *cobra.Command, args []string) error {
+	if flagHelpAuth {
+		printGenerateAuthHelp(cmd.OutOrStdout())
+		return nil
+	}
+
 	if err := validateFlags(); err != nil {
 		return err
 	}
@@ -477,6 +487,33 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func hideGenerateAuthFlags() {
+	for _, name := range []string{
+		"auth-token",
+		"auth-type",
+		"auth-header-name",
+		"auth-key-file",
+		"oauth",
+		"client-id",
+		"client-secret",
+		"save-credentials",
+	} {
+		_ = generateCmd.Flags().MarkHidden(name)
+	}
+}
+
+func printGenerateAuthHelp(out io.Writer) {
+	fmt.Fprintln(out, "Authentication flags for clihub generate:")
+	fmt.Fprintln(out, "  --oauth                     use OAuth for authentication (interactive browser flow)")
+	fmt.Fprintln(out, "  --auth-token string         bearer token for authenticated MCP servers")
+	fmt.Fprintln(out, "  --auth-type string          authentication type: bearer, api_key, basic, oauth2, s2s_oauth2, dcr_oauth, google_sa, none")
+	fmt.Fprintln(out, "  --auth-header-name string   custom header name for api_key auth (default X-API-Key)")
+	fmt.Fprintln(out, "  --auth-key-file string      path to Google service account JSON key file")
+	fmt.Fprintln(out, "  --client-id string          pre-registered OAuth client ID (use with --oauth)")
+	fmt.Fprintln(out, "  --client-secret string      pre-registered OAuth client secret (use with --oauth)")
+	fmt.Fprintln(out, "  --save-credentials          persist auth token to ~/.clihub/credentials.json")
 }
 
 // processToolSchemas converts mcp-go tools to codegen tool definitions.

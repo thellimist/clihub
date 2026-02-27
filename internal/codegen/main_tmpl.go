@@ -63,6 +63,7 @@ var (
 	globalAuthHeaderName string
 	globalAuthUsername   string
 	globalAuthPassword   string
+	globalHelpAuth       bool
 )
 
 func main() {
@@ -80,6 +81,8 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&globalAuthHeaderName, "auth-header-name", "", "custom header name for api_key auth (default X-API-Key)")
 	rootCmd.PersistentFlags().StringVar(&globalAuthUsername, "auth-username", "", "username for basic auth")
 	rootCmd.PersistentFlags().StringVar(&globalAuthPassword, "auth-password", "", "password for basic auth")
+	rootCmd.PersistentFlags().BoolVar(&globalHelpAuth, "help-auth", false, "show authentication flags and exit")
+	hideAuthFlags(rootCmd)
 
 {{- range .Tools}}
 	rootCmd.AddCommand(cmd{{funcName .Name}}())
@@ -88,10 +91,45 @@ func main() {
 	rootCmd.AddCommand(cmdAuth())
 {{- end}}
 
+	if wantsAuthHelp(os.Args[1:]) {
+		printAuthFlagHelp(os.Stdout)
+		return
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
+}
+
+func wantsAuthHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help-auth" || arg == "--help-auth=true" {
+			return true
+		}
+	}
+	return false
+}
+
+func hideAuthFlags(rootCmd *cobra.Command) {
+	for _, name := range []string{
+		"auth-token",
+		"auth-type",
+		"auth-header-name",
+		"auth-username",
+		"auth-password",
+	} {
+		_ = rootCmd.PersistentFlags().MarkHidden(name)
+	}
+}
+
+func printAuthFlagHelp(out io.Writer) {
+	fmt.Fprintln(out, "Authentication flags:")
+	fmt.Fprintln(out, "  --auth-token string         bearer token for authenticated MCP servers")
+	fmt.Fprintln(out, "  --auth-type string          authentication type: bearer, api_key, basic, none")
+	fmt.Fprintln(out, "  --auth-header-name string   custom header name for api_key auth (default X-API-Key)")
+	fmt.Fprintln(out, "  --auth-username string      username for basic auth")
+	fmt.Fprintln(out, "  --auth-password string      password for basic auth")
 }
 
 // --- Tool commands ---

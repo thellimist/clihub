@@ -21,15 +21,6 @@ Every tool the server exposes becomes a subcommand with flags derived from its J
 go install github.com/thellimist/clihub@latest
 ```
 
-If `go install` fails with
-`fatal: could not read Username for 'https://github.com': terminal prompts disabled`,
-your git/go setup is trying to fetch directly from GitHub without credentials. Use one of:
-
-- Configure GitHub auth for git (HTTPS token or SSH key).
-- Force the public Go proxy: `GOPROXY=https://proxy.golang.org,direct go install github.com/thellimist/clihub@latest`
-- Build from source (below).
-
-Note: the canonical module path is `github.com/thellimist/clihub` (not `github.com/clihub/clihub`).
 
 Or build from source:
 
@@ -108,6 +99,12 @@ Generated CLIs handle auth at runtime. For HTTP servers, the `auth` subcommand m
 ./out/linear auth logout
 ```
 
+Some MCPs require generatin-time auth. Use
+
+```bash
+clihub generate --help-auth
+```
+
 Auth is resolved in this order:
 
 1. `--auth-token` flag
@@ -144,7 +141,7 @@ Output:
   --output string           Output directory (default "./out/")
   --platform string         Target GOOS/GOARCH pairs or 'all' (default current platform)
 
-Auth:
+Auth (shown via `--help-auth`):
   --oauth                   Use OAuth for authentication (browser flow)
   --auth-token string       Bearer token
   --auth-type string        Auth type: bearer, api_key, basic, none
@@ -159,6 +156,7 @@ Filtering:
   --exclude-tools string    Exclude these tools (comma-separated)
 
 Other:
+  --help-auth              Show authentication flags and exit
   --verbose                 Show detailed progress
   --quiet                   Suppress all output except errors
 ```
