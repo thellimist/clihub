@@ -21,6 +21,7 @@ Every tool the server exposes becomes a subcommand with flags derived from its J
 go install github.com/thellimist/clihub@latest
 ```
 
+If `clihub` is not found after install, run `export PATH="$(go env GOPATH)/bin:$PATH"` to add Go-installed binaries (usually `~/go/bin`) to your current shell `PATH`.
 
 Or build from source:
 
