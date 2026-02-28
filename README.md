@@ -87,6 +87,17 @@ Rules:
 - `--from-json` cannot be combined with typed flags in the same call.
 - If a tool already has a `--from-json` flag from its schema, clihub uses `--clihub-from-json` for passthrough instead.
 
+### Closure Config
+
+Bake parameters into generated CLIs at build time. Hidden mode injects them silently; default mode exposes them as flag defaults.
+
+```bash
+clihub generate --url https://mcp.linear.app/mcp --closure closure.json
+clihub generate --url https://mcp.linear.app/mcp --set teamId=TEAM-123 --closure-mode hidden
+```
+
+See [docs/closure-config.md](docs/closure-config.md) for the full guide.
+
 ## How It Works
 
 1. **Connect** to the MCP server (HTTP or stdio)
@@ -166,6 +177,12 @@ Auth (shown via `--help-auth`):
   --client-secret string    Pre-registered OAuth client secret
   --save-credentials        Persist auth token to credential store
 
+Closure:
+  --closure string          Path to a closure config file for parameter injection
+  --set strings             Set a global closure param (repeatable, key=value)
+  --set-tool strings        Set a tool-specific closure param (repeatable, toolname.key=value)
+  --closure-mode string     Override closure mode: hidden or default
+
 Filtering:
   --include-tools string    Only include these tools (comma-separated)
   --exclude-tools string    Exclude these tools (comma-separated)
@@ -180,8 +197,10 @@ Other:
 
 ```
 cmd/              CLI commands (root, generate)
+docs/             Documentation (closure config, etc.)
 internal/
   auth/           Auth providers, OAuth flow, credential store
+  closure/        Closure config loading, merging, and validation
   codegen/        Go template for generated CLIs
   compile/        Go compiler invocation, cross-compilation
   nameutil/       Binary name inference from URLs/commands

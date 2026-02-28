@@ -16,6 +16,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/spf13/cobra"
 	"github.com/thellimist/clihub/internal/auth"
+	"github.com/thellimist/clihub/internal/closure"
 	"github.com/thellimist/clihub/internal/codegen"
 	"github.com/thellimist/clihub/internal/compile"
 	"github.com/thellimist/clihub/internal/gocheck"
@@ -45,6 +46,10 @@ var (
 	flagHelpAuth        bool
 	flagVerbose         bool
 	flagQuiet           bool
+	flagClosure         string
+	flagSet             []string
+	flagSetTool         []string
+	flagClosureMode     string
 )
 
 var generateCmd = &cobra.Command{
@@ -103,6 +108,10 @@ func init() {
 	f.BoolVar(&flagHelpAuth, "help-auth", false, "show authentication flags and exit")
 	f.BoolVar(&flagVerbose, "verbose", false, "show detailed progress during generation")
 	f.BoolVar(&flagQuiet, "quiet", false, "suppress all output except errors")
+	f.StringVar(&flagClosure, "closure", "", "path to a closure config file for parameter injection (visible mode sets defaults; hidden mode silently overrides values, including --from-json input)")
+	f.StringArrayVar(&flagSet, "set", nil, "set a global closure param inline (repeatable, key=value; JSON values parsed automatically; overrides --closure file)")
+	f.StringArrayVar(&flagSetTool, "set-tool", nil, "set a tool-specific closure param inline (repeatable, toolname.key=value; overrides --closure file)")
+	f.StringVar(&flagClosureMode, "closure-mode", "", "override closure mode: hidden (bake in silently) or default (expose as flag defaults)")
 
 	hideGenerateAuthFlags()
 }
@@ -115,6 +124,28 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	if err := validateFlags(); err != nil {
 		return err
+	}
+
+	// Load closure config if --closure is provided
+	var closureConfig *closure.Config
+	if flagClosure != "" {
+		verbose("Loading closure config from %s...", flagClosure)
+		cfg, err := closure.Load(flagClosure)
+		if err != nil {
+			return fmt.Errorf("closure config: %w", err)
+		}
+		closureConfig = cfg
+		verbose("Closure config loaded (mode=%s)", cfg.Mode)
+	}
+
+	// Merge CLI --set / --set-tool / --closure-mode overrides into config.
+	if len(flagSet) > 0 || len(flagSetTool) > 0 || flagClosureMode != "" {
+		merged, err := closure.MergeOverrides(closureConfig, flagSet, flagSetTool, flagClosureMode)
+		if err != nil {
+			return fmt.Errorf("closure overrides: %w", err)
+		}
+		closureConfig = merged
+		verbose("Closure overrides applied (mode=%s)", closureConfig.Mode)
 	}
 
 	// REQ-01, REQ-66: Check Go toolchain
@@ -382,6 +413,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		Tools:         toolDefs,
 		ClihubVersion: appVersion,
 		IsHTTP:        flagURL != "",
+		ClosureConfig: closureConfig,
 	}
 
 	if flagURL != "" {

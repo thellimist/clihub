@@ -1,6 +1,9 @@
 package codegen
 
-import "github.com/thellimist/clihub/internal/schema"
+import (
+	"github.com/thellimist/clihub/internal/closure"
+	"github.com/thellimist/clihub/internal/schema"
+)
 
 // GenerateContext holds all data needed to generate a CLI project.
 type GenerateContext struct {
@@ -11,7 +14,8 @@ type GenerateContext struct {
 	EnvKeys       []string  // Env var keys to embed (not values)
 	Tools         []ToolDef // Tool definitions with options
 	ClihubVersion string    // clihub version for header comment
-	IsHTTP        bool      // True = HTTP transport, false = stdio
+	IsHTTP        bool            // True = HTTP transport, false = stdio
+	ClosureConfig *closure.Config // Optional closure config for param injection
 }
 
 // ToolDef represents a single MCP tool for code generation.
