@@ -143,9 +143,12 @@ func chooseFromJSONFlagName(cmd *cobra.Command) string {
 
 // --- Tool commands ---
 {{range .Tools}}
+{{- $toolName := .Name}}
 func cmd{{funcName .Name}}() *cobra.Command {
 {{- range .Options}}
+{{- if not (closureSkipFlag $.ClosureConfig $toolName .PropertyName)}}
 	var {{varName .FlagName}} {{.GoType}}
+{{- end}}
 {{- end}}
 	var flagFromJSON string
 	fromJSONFlagName := "from-json"
@@ -161,9 +164,11 @@ func cmd{{funcName .Name}}() *cobra.Command {
 			if flagFromJSON != "" {
 				var conflictingFlag string
 {{- range .Options}}
+{{- if not (closureSkipFlag $.ClosureConfig $toolName .PropertyName)}}
 				if conflictingFlag == "" && cmd.Flags().Changed({{quote .FlagName}}) {
 					conflictingFlag = {{quote .FlagName}}
 				}
+{{- end}}
 {{- end}}
 				if conflictingFlag != "" {
 					return fmt.Errorf("--%s cannot be combined with --%s", fromJSONFlagName, conflictingFlag)
@@ -173,6 +178,7 @@ func cmd{{funcName .Name}}() *cobra.Command {
 				}
 			} else {
 {{- range .Options}}
+{{- if not (closureSkipFlag $.ClosureConfig $toolName .PropertyName)}}
 {{- if eq .GoType "string"}}
 					if {{varName .FlagName}} != "" {
 					params[{{quote .PropertyName}}] = {{varName .FlagName}}
@@ -199,8 +205,24 @@ func cmd{{funcName .Name}}() *cobra.Command {
 				}
 {{- end}}
 {{- end}}
+{{- end}}
 			}
-{{range .Options}}{{if .EnumValues}}
+{{- if closureHasParams $.ClosureConfig $toolName}}
+			// Inject closure params
+			var closureParams map[string]interface{}
+			if err := json.Unmarshal([]byte({{closureMerged $.ClosureConfig $toolName}}), &closureParams); err == nil {
+				for k, v := range closureParams {
+{{- if closureIsHidden $.ClosureConfig}}
+					params[k] = v
+{{- else}}
+					if _, exists := params[k]; !exists {
+						params[k] = v
+					}
+{{- end}}
+				}
+			}
+{{- end}}
+{{range .Options}}{{if .EnumValues}}{{if not (closureSkipFlag $.ClosureConfig $toolName .PropertyName)}}
 			// Validate enum for {{.FlagName}}
 			if v, ok := params[{{quote .PropertyName}}]; ok {
 				if s, ok := v.(string); ok {
@@ -217,16 +239,23 @@ func cmd{{funcName .Name}}() *cobra.Command {
 					}
 				}
 			}
-{{end}}{{end}}
+{{end}}{{end}}{{end}}
 			return callTool({{quote .Name}}, params)
 		},
 	}
 
 {{- range .Options}}
+{{- if not (closureSkipFlag $.ClosureConfig $toolName .PropertyName)}}
+{{- $closureDefault := closureDefault $.ClosureConfig $toolName .PropertyName .GoType}}
+{{- if $closureDefault}}
+	cmd.Flags().{{cobraFlag .GoType}}(&{{varName .FlagName}}, {{quote .FlagName}}, {{$closureDefault}}, {{quote (hasEnumDesc .Description .EnumValues)}})
+{{- else}}
 	cmd.Flags().{{cobraFlag .GoType}}(&{{varName .FlagName}}, {{quote .FlagName}}, {{defaultLit .GoType .DefaultValue}}, {{quote (hasEnumDesc .Description .EnumValues)}})
 {{- end}}
+{{- end}}
+{{- end}}
 	fromJSONFlagName = chooseFromJSONFlagName(cmd)
-	cmd.Flags().StringVar(&flagFromJSON, fromJSONFlagName, "", "tool input as JSON (bypasses typed flags)")
+	cmd.Flags().StringVar(&flagFromJSON, fromJSONFlagName, "", "tool input as JSON (bypasses typed flags; hidden closure params will override matching keys)")
 
 	return cmd
 }

@@ -1,19 +1,27 @@
 package codegen
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/thellimist/clihub/internal/closure"
 )
 
 var mainTemplate = template.Must(template.New("main.go").Funcs(template.FuncMap{
-	"quoteSlice":  quoteSlice,
-	"cobraFlag":   cobraFlagType,
-	"defaultLit":  defaultValueLiteral,
-	"varName":     toVarName,
-	"funcName":    toFuncName,
-	"quote":       quoteStr,
-	"hasEnumDesc": hasEnumDesc,
+	"quoteSlice":       quoteSlice,
+	"cobraFlag":        cobraFlagType,
+	"defaultLit":       defaultValueLiteral,
+	"varName":          toVarName,
+	"funcName":         toFuncName,
+	"quote":            quoteStr,
+	"hasEnumDesc":      hasEnumDesc,
+	"closureMerged":    closureMergedJSON,
+	"closureIsHidden":  closureIsHidden,
+	"closureHasParams": closureHasParams,
+	"closureSkipFlag":  closureSkipFlag,
+	"closureDefault":   closureDefaultLiteral,
 }).Parse(mainTemplateSource))
 
 var goModTemplate = template.Must(template.New("go.mod").Parse(goModTemplateSource))
@@ -130,4 +138,59 @@ func hasEnumDesc(desc string, enums []string) string {
 		return desc
 	}
 	return desc + " (" + strings.Join(enums, "|") + ")"
+}
+
+// closureMergedJSON returns the merged closure params (global + tool-specific)
+// as a Go-embeddable JSON string literal. Returns empty string if no params.
+func closureMergedJSON(cfg *closure.Config, toolName string) string {
+	if cfg == nil {
+		return ""
+	}
+	merged := cfg.Merge(toolName)
+	if len(merged) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(merged)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%q", string(data))
+}
+
+// closureIsHidden returns true if the closure config uses hidden mode.
+func closureIsHidden(cfg *closure.Config) bool {
+	return cfg != nil && cfg.Mode == closure.ModeHidden
+}
+
+// closureHasParams returns true if the closure config has any params for a tool.
+func closureHasParams(cfg *closure.Config, toolName string) bool {
+	if cfg == nil {
+		return false
+	}
+	return len(cfg.Merge(toolName)) > 0
+}
+
+// closureSkipFlag returns true if this flag should be skipped in hidden mode
+// (i.e., the param is closure-injected and mode is hidden).
+func closureSkipFlag(cfg *closure.Config, toolName, propertyName string) bool {
+	if cfg == nil || cfg.Mode != closure.ModeHidden {
+		return false
+	}
+	merged := cfg.Merge(toolName)
+	_, ok := merged[propertyName]
+	return ok
+}
+
+// closureDefaultLiteral returns the Go literal for a closure default value
+// given the flag's Go type. Used in "default" mode to override flag defaults.
+func closureDefaultLiteral(cfg *closure.Config, toolName, propertyName, goType string) string {
+	if cfg == nil || cfg.Mode != closure.ModeDefault {
+		return ""
+	}
+	merged := cfg.Merge(toolName)
+	val, ok := merged[propertyName]
+	if !ok {
+		return ""
+	}
+	return defaultValueLiteral(goType, val)
 }
