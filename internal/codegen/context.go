@@ -47,11 +47,17 @@ type OpenAPIToolDef struct {
 
 // AllParams returns all parameters for this operation in flag order:
 // path params first, then query, then header, then body.
+// Deduplicates by FlagName (path/query/header params take precedence over body).
 func (t OpenAPIToolDef) AllParams() []schema.ToolOption {
+	seen := make(map[string]bool)
 	var all []schema.ToolOption
-	all = append(all, t.PathParams...)
-	all = append(all, t.QueryParams...)
-	all = append(all, t.HeaderParams...)
-	all = append(all, t.BodyParams...)
+	for _, opts := range [][]schema.ToolOption{t.PathParams, t.QueryParams, t.HeaderParams, t.BodyParams} {
+		for _, opt := range opts {
+			if !seen[opt.FlagName] {
+				seen[opt.FlagName] = true
+				all = append(all, opt)
+			}
+		}
+	}
 	return all
 }
