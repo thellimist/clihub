@@ -20,6 +20,7 @@ import (
 	"github.com/thellimist/clihub/internal/compile"
 	"github.com/thellimist/clihub/internal/gocheck"
 	"github.com/thellimist/clihub/internal/nameutil"
+	"github.com/thellimist/clihub/internal/openapi"
 	"github.com/thellimist/clihub/internal/schema"
 	"github.com/thellimist/clihub/internal/toolfilter"
 )
@@ -27,6 +28,7 @@ import (
 var (
 	flagURL             string
 	flagStdio           string
+	flagOpenAPI         string
 	flagName            string
 	flagOutput          string
 	flagPlatform        string
@@ -49,11 +51,12 @@ var (
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
-	Short: "Generate a CLI from an MCP server",
-	Long: `Generate a compiled CLI binary from an MCP server.
+	Short: "Generate a CLI from an MCP server or OpenAPI spec",
+	Long: `Generate a compiled CLI binary from an MCP server or OpenAPI spec.
 
-clihub connects to an MCP server, discovers its tools, generates a Go CLI
-with one subcommand per tool, and compiles it to a native binary.
+clihub connects to an MCP server or reads an OpenAPI spec, discovers its
+tools/endpoints, generates a Go CLI with one subcommand per tool/endpoint,
+and compiles it to a native binary.
 
 Examples:
   # From an HTTP MCP server
@@ -62,8 +65,14 @@ Examples:
   # From a stdio MCP server
   clihub generate --stdio "npx @modelcontextprotocol/server-github"
 
-  # With authentication
-  clihub generate --url https://mcp.example.com/mcp --auth-token $TOKEN
+  # From an OpenAPI spec (URL or file)
+  clihub generate --openapi https://petstore3.swagger.io/api/v3/openapi.json
+
+  # From a local OpenAPI spec file
+  clihub generate --openapi ./api-spec.yaml --name myapi
+
+  # OpenAPI with authentication
+  clihub generate --openapi https://api.example.com/openapi.json --auth-type api_key --auth-token $KEY
 
   # With OAuth authentication (interactive browser flow)
   clihub generate --url https://mcp.notion.com/mcp --oauth
@@ -71,7 +80,7 @@ Examples:
   # Cross-compile for multiple platforms
   clihub generate --url https://mcp.example.com/mcp --platform linux/amd64,darwin/arm64
 
-  # Filter tools
+  # Filter tools/operations
   clihub generate --url https://mcp.example.com/mcp --include-tools create_issue,list_issues
 
   # Pass environment variables to stdio server
@@ -85,6 +94,7 @@ func init() {
 	f := generateCmd.Flags()
 	f.StringVar(&flagURL, "url", "", "Streamable HTTP URL of an MCP server")
 	f.StringVar(&flagStdio, "stdio", "", "shell command that spawns a local MCP server via stdin/stdout")
+	f.StringVar(&flagOpenAPI, "openapi", "", "OpenAPI 3.x spec URL or file path")
 	f.StringVar(&flagName, "name", "", "override the auto-inferred name for the generated CLI")
 	f.StringVar(&flagOutput, "output", "./out/", "directory where compiled binaries are written")
 	f.StringVar(&flagPlatform, "platform", runtime.GOOS+"/"+runtime.GOARCH, "comma-separated GOOS/GOARCH pairs or 'all'")
@@ -115,6 +125,11 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	if err := validateFlags(); err != nil {
 		return err
+	}
+
+	// Branch to OpenAPI flow if --openapi is set.
+	if flagOpenAPI != "" {
+		return runGenerateOpenAPI(cmd)
 	}
 
 	// REQ-01, REQ-66: Check Go toolchain
@@ -490,6 +505,214 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runGenerateOpenAPI(cmd *cobra.Command) error {
+	// Check Go toolchain.
+	verbose("Checking Go toolchain...")
+	goVersion, err := gocheck.Check()
+	if err != nil {
+		return err
+	}
+	verbose("Found %s", goVersion)
+
+	// Build auth headers for fetching the spec (if needed).
+	var authHeaders map[string]string
+	if flagAuthToken != "" {
+		headerName := "Authorization"
+		headerValue := "Bearer " + flagAuthToken
+		if flagAuthType == "api_key" {
+			headerName = flagAuthHeaderName
+			if headerName == "" {
+				headerName = "X-API-Key"
+			}
+			headerValue = flagAuthToken
+		}
+		authHeaders = map[string]string{headerName: headerValue}
+	}
+
+	// Load OpenAPI spec.
+	verbose("Loading OpenAPI spec from %s...", flagOpenAPI)
+	ctx := context.Background()
+	doc, err := openapi.LoadSpec(ctx, flagOpenAPI, authHeaders)
+	if err != nil {
+		return err
+	}
+	verbose("Loaded: %s (version %s)", doc.Info.Title, doc.Info.Version)
+
+	// Extract operations.
+	verbose("Extracting API operations...")
+	ops, err := openapi.ExtractOperations(doc)
+	if err != nil {
+		return err
+	}
+	if len(ops) == 0 {
+		return fmt.Errorf("OpenAPI spec contains no operations")
+	}
+	verbose("Found %d operations", len(ops))
+
+	// Apply tool filtering (filter on command names).
+	include := toolfilter.ParseToolList(flagIncludeTools)
+	exclude := toolfilter.ParseToolList(flagExcludeTools)
+
+	if len(include) > 0 || len(exclude) > 0 {
+		filterTools := make([]toolfilter.Tool, len(ops))
+		for i, op := range ops {
+			filterTools[i] = toolfilter.Tool{Name: op.CommandName, Description: op.Summary}
+		}
+
+		filtered, err := toolfilter.FilterTools(filterTools, include, exclude)
+		if err != nil {
+			return err
+		}
+
+		filteredSet := make(map[string]bool, len(filtered))
+		for _, ft := range filtered {
+			filteredSet[ft.Name] = true
+		}
+		var filteredOps []openapi.Operation
+		for _, op := range ops {
+			if filteredSet[op.CommandName] {
+				filteredOps = append(filteredOps, op)
+			}
+		}
+		ops = filteredOps
+		verbose("After filtering: %d operations", len(ops))
+	}
+
+	// Extract base URL.
+	baseURL := openapi.BaseURL(doc)
+	if baseURL == "" {
+		return fmt.Errorf("OpenAPI spec has no servers defined; provide --base-url (not yet supported at generation time)")
+	}
+	verbose("Base URL: %s", baseURL)
+
+	// Infer CLI name.
+	cliName := flagName
+	if cliName == "" {
+		// Try from spec title first.
+		if doc.Info.Title != "" {
+			cliName = nameutil.Slugify(doc.Info.Title)
+		}
+		if cliName == "" {
+			isURL := strings.HasPrefix(flagOpenAPI, "http://") || strings.HasPrefix(flagOpenAPI, "https://")
+			cliName = nameutil.InferName(flagOpenAPI, isURL)
+		}
+		if cliName == "" {
+			cliName = "api-cli"
+		}
+		verbose("Inferred CLI name: %s", cliName)
+	}
+
+	// Build codegen context.
+	toolDefs := make([]codegen.OpenAPIToolDef, len(ops))
+	for i, op := range ops {
+		toolDefs[i] = codegen.OpenAPIToolDef{
+			OperationID:  op.OperationID,
+			CommandName:  op.CommandName,
+			Description:  op.Summary,
+			Method:       op.Method,
+			Path:         op.Path,
+			PathParams:   op.PathParams,
+			QueryParams:  op.QueryParams,
+			HeaderParams: op.HeaderParams,
+			BodyParams:   op.BodyParams,
+			HasBody:      op.HasBody,
+		}
+	}
+
+	genCtx := codegen.OpenAPIGenerateContext{
+		CLIName:       cliName,
+		BaseURL:       baseURL,
+		Title:         doc.Info.Title,
+		Operations:    toolDefs,
+		ClihubVersion: appVersion,
+	}
+
+	// Generate Go project.
+	verbose("Generating Go project...")
+	projectDir, err := codegen.GenerateOpenAPI(genCtx, "")
+	if err != nil {
+		return fmt.Errorf("code generation failed: %w", err)
+	}
+
+	cleanupDir := projectDir
+	defer func() {
+		if cleanupDir != "" {
+			os.RemoveAll(cleanupDir)
+		}
+	}()
+
+	verbose("Generated project at %s", projectDir)
+
+	// Parse platforms.
+	platforms, err := compile.ParsePlatforms(flagPlatform)
+	if err != nil {
+		return err
+	}
+	multiPlatform := len(platforms) > 1
+
+	// Compile for each platform.
+	var binaries []string
+	for _, p := range platforms {
+		if flagVerbose {
+			fmt.Printf("Compiling %s...", p)
+		}
+
+		start := time.Now()
+		binaryPath, err := compile.Compile(projectDir, flagOutput, cliName, p, multiPlatform)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			if flagVerbose {
+				fmt.Println(" failed")
+			}
+			cleanupDir = ""
+			return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+		}
+
+		if flagVerbose {
+			fmt.Printf(" done (%.1fs)\n", elapsed.Seconds())
+		}
+		binaries = append(binaries, binaryPath)
+	}
+
+	// Smoke test.
+	hostGOOS, hostGOARCH := compile.CurrentPlatform()
+	hostPlatform := hostGOOS + "/" + hostGOARCH
+	var hostBinary string
+	for i, p := range platforms {
+		if p.String() == hostPlatform {
+			hostBinary = binaries[i]
+			break
+		}
+	}
+
+	if hostBinary != "" {
+		verbose("Running smoke test...")
+		if err := compile.SmokeTest(hostBinary); err != nil {
+			cleanupDir = ""
+			return fmt.Errorf("%s\nGenerated source preserved at: %s", err, projectDir)
+		}
+		verbose("Smoke test passed")
+	} else {
+		verbose("Warning: smoke test skipped — no binary for host platform (%s)", hostPlatform)
+	}
+
+	// Print summary.
+	if !flagQuiet {
+		fmt.Printf("Generated %s from %s (%d operations, %d platform", cliName, flagOpenAPI, len(ops), len(platforms))
+		if len(platforms) != 1 {
+			fmt.Print("s")
+		}
+		fmt.Println(")")
+		fmt.Println("Binaries:")
+		for _, b := range binaries {
+			fmt.Printf("  %s\n", b)
+		}
+	}
+
+	return nil
+}
+
 func hideGenerateAuthFlags() {
 	for _, name := range []string{
 		"auth-token",
@@ -832,12 +1055,22 @@ func info(format string, args ...interface{}) {
 }
 
 func validateFlags() error {
-	if flagURL == "" && flagStdio == "" {
-		return fmt.Errorf("provide --url or --stdio to specify the MCP server")
+	sourceCount := 0
+	if flagURL != "" {
+		sourceCount++
+	}
+	if flagStdio != "" {
+		sourceCount++
+	}
+	if flagOpenAPI != "" {
+		sourceCount++
 	}
 
-	if flagURL != "" && flagStdio != "" {
-		return fmt.Errorf("--url and --stdio cannot be used together")
+	if sourceCount == 0 {
+		return fmt.Errorf("provide --url, --stdio, or --openapi to specify the source")
+	}
+	if sourceCount > 1 {
+		return fmt.Errorf("--url, --stdio, and --openapi cannot be used together")
 	}
 
 	if flagIncludeTools != "" && flagExcludeTools != "" {
