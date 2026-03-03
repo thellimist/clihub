@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,16 @@ import (
 // If outputDir is empty, a temporary directory is created and its path returned.
 // Returns the project directory path.
 func Generate(ctx GenerateContext, outputDir string) (string, error) {
+	return generateProject(mainTemplate, goModTemplate, ctx, outputDir)
+}
+
+// GenerateOpenAPI creates a Go project from an OpenAPI spec context.
+// The generated CLI makes direct HTTP calls (no mcp-go dependency).
+func GenerateOpenAPI(ctx OpenAPIGenerateContext, outputDir string) (string, error) {
+	return generateProject(openAPIMainTemplate, openAPIGoModTemplate, ctx, outputDir)
+}
+
+func generateProject(mainTmpl, modTmpl interface{ Execute(w io.Writer, data any) error }, data any, outputDir string) (string, error) {
 	if outputDir == "" {
 		dir, err := os.MkdirTemp("", "clihub-*")
 		if err != nil {
@@ -31,7 +42,7 @@ func Generate(ctx GenerateContext, outputDir string) (string, error) {
 	}
 	defer mainFile.Close()
 
-	if err := mainTemplate.Execute(mainFile, ctx); err != nil {
+	if err := mainTmpl.Execute(mainFile, data); err != nil {
 		return outputDir, fmt.Errorf("render main.go template: %w", err)
 	}
 
@@ -43,7 +54,7 @@ func Generate(ctx GenerateContext, outputDir string) (string, error) {
 	}
 	defer modFile.Close()
 
-	if err := goModTemplate.Execute(modFile, ctx); err != nil {
+	if err := modTmpl.Execute(modFile, data); err != nil {
 		return outputDir, fmt.Errorf("render go.mod template: %w", err)
 	}
 

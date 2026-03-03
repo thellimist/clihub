@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/thellimist/clihub/internal/schema"
 )
 
 var mainTemplate = template.Must(template.New("main.go").Funcs(template.FuncMap{
@@ -17,6 +19,24 @@ var mainTemplate = template.Must(template.New("main.go").Funcs(template.FuncMap{
 }).Parse(mainTemplateSource))
 
 var goModTemplate = template.Must(template.New("go.mod").Parse(goModTemplateSource))
+
+var openAPIFuncMap = template.FuncMap{
+	"quoteSlice":       quoteSlice,
+	"cobraFlag":        cobraFlagType,
+	"defaultLit":       defaultValueLiteral,
+	"varName":          toVarName,
+	"funcName":         toFuncName,
+	"quote":            quoteStr,
+	"hasEnumDesc":      hasEnumDesc,
+	"upper":            strings.ToUpper,
+	"pathParamNames":   paramPropertyNames,
+	"queryParamNames":  paramPropertyNames,
+	"headerParamNames": paramPropertyNames,
+}
+
+var openAPIMainTemplate = template.Must(template.New("openapi_main.go").Funcs(openAPIFuncMap).Parse(openAPIMainTemplateSource))
+
+var openAPIGoModTemplate = template.Must(template.New("openapi_go.mod").Parse(openAPIGoModTemplateSource))
 
 func quoteStr(s string) string {
 	return fmt.Sprintf("%q", s)
@@ -130,4 +150,13 @@ func hasEnumDesc(desc string, enums []string) string {
 		return desc
 	}
 	return desc + " (" + strings.Join(enums, "|") + ")"
+}
+
+// paramPropertyNames extracts the PropertyName from each ToolOption.
+func paramPropertyNames(opts []schema.ToolOption) []string {
+	names := make([]string, len(opts))
+	for i, o := range opts {
+		names[i] = o.PropertyName
+	}
+	return names
 }

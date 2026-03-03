@@ -14,8 +14,8 @@ func SetVersion(v string) {
 
 var rootCmd = &cobra.Command{
 	Use:   "clihub",
-	Short: "Turn any MCP server into a compiled CLI binary",
-	Long:  "clihub turns any MCP server into a compiled, standalone command-line tool.",
+	Short: "Turn any MCP server or OpenAPI spec into a compiled CLI binary",
+	Long:  "clihub turns any MCP server or OpenAPI spec into a compiled, standalone command-line tool.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
