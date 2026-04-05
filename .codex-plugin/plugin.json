@@ -1,0 +1,24 @@
+{
+  "name": "clihub",
+  "version": "0.1.0",
+  "description": "Turn any MCP server into CLI from Codex via MCP",
+  "author": {
+    "name": "thellimist",
+    "url": "https://github.com/thellimist/clihub"
+  },
+  "homepage": "https://github.com/thellimist/clihub",
+  "repository": "https://github.com/thellimist/clihub",
+  "keywords": [
+    "mcp",
+    "codex"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Clihub",
+    "shortDescription": "Turn any MCP server into CLI from Codex via MCP",
+    "longDescription": "Turn any MCP server into CLI.",
+    "category": "Development",
+    "websiteURL": "https://github.com/thellimist/clihub"
+  }
+}
