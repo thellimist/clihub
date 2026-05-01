@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "clihub": {
+      "command": "go",
+      "args": [
+        "run",
+        "github.com/thellimist/clihub@latest"
+      ]
+    }
+  }
+}
